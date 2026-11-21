@@ -1,0 +1,18 @@
+{
+  "name": "Magic Repo",
+  "description": "Cloudstream eklentileri",
+  "manifestVersion": 1,
+  "plugins": [
+    {
+      "name": "CizgiMax",
+      "internalName": "CizgiMax",
+      "description": "CizgiMax çizgi film ve dizi eklentisi.",
+      "authors": ["BTcozum", "keyiflerolsun"],
+      "repositoryUrl": "https://github.com/MhmtKilic/Magic",
+      "url": "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/CizgiMax.cs3",
+      "version": 5,
+      "tvTypes": ["Cartoon"],
+      "language": "tr"
+    }
+  ]
+}
