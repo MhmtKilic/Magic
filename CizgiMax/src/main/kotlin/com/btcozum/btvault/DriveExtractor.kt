@@ -10,7 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import java.net.URLDecoder // <-- Eklendi
+import java.net.URLDecoder // <-- Hata veren kütüphane yerine bu eklendi
 
 open class Drive : ExtractorApi() {
     override var name            = "Drive"
@@ -35,9 +35,8 @@ open class Drive : ExtractorApi() {
             .find(iSource)?.groupValues?.get(1)
             ?: throw IllegalArgumentException("fmt_stream_map not found")
         
-        // decodeUri yerine Java'nın kendi URLDecoder'ı:
-        val decoded = URLDecoder.decode(bakalim, "UTF-8") 
-        
+        // StringUtils.decodeUri() kaldırıldı, yerine URLDecoder.decode() geldi
+        val decoded = URLDecoder.decode(bakalim, "UTF-8")
         val m3uLink = decoded.split("|").last()
         Log.d("Kekik_${this.name}", "m3uLink » $m3uLink")
 
