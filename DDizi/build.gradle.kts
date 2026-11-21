@@ -1,0 +1,14 @@
+version = 3
+
+cloudstream {
+    authors     = listOf("BTcozum")
+    language    = "tr"
+    description = "DDizi - Yabanci dizi izle"
+
+    /**
+     * Status: 0=Down, 1=Ok, 2=Slow, 3=Beta
+    **/
+    status  = 1
+    tvTypes = listOf("TvSeries")
+    iconUrl = "https://www.google.com/s2/favicons?domain=ddizi.tel&sz=%size%"
+}
