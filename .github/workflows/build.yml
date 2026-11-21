@@ -52,8 +52,8 @@ jobs:
           chmod +x gradlew
           ./gradlew make makePluginsJson
           cp **/build/*.cs3 ${{ github.workspace }}/builds/
-          # plugins.json dosyasının yolu düzeltildi (build/ klasöründen çıkarıldı)
-          cp plugins.json ${{ github.workspace }}/builds/
+          # DÜZELTME: Dosya src/build/ içinde oluşuyor
+          cp build/plugins.json ${{ github.workspace }}/builds/
 
       - name: Push builds
         working-directory: ${{ github.workspace }}/builds
