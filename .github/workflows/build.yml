@@ -68,3 +68,4 @@ jobs:
           
           git commit --amend -m "Build ${{ github.sha }}"
           git push --force
+
