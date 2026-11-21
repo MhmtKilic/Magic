@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v4 # v7 yerine v4 kullanmak daha garantidir, ama sende çalışıyorsa v7 kalsın
+        uses: actions/checkout@v4
         with:
           path: "src"
 
@@ -52,7 +52,8 @@ jobs:
           chmod +x gradlew
           ./gradlew make makePluginsJson
           cp **/build/*.cs3 ${{ github.workspace }}/builds/
-          cp build/plugins.json ${{ github.workspace }}/builds/
+          # plugins.json dosyasının yolu düzeltildi (build/ klasöründen çıkarıldı)
+          cp plugins.json ${{ github.workspace }}/builds/
 
       - name: Push builds
         working-directory: ${{ github.workspace }}/builds
@@ -69,7 +70,6 @@ jobs:
           git commit --amend -m "Build ${{ github.sha }}"
           git push --force
 
-      # İŞTE EKLENEN KISIM (RELEASE OLUŞTURMA)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
