@@ -9,8 +9,8 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.StringUtils.decodeUri
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URLDecoder // <-- Eklendi
 
 open class Drive : ExtractorApi() {
     override var name            = "Drive"
@@ -34,7 +34,10 @@ open class Drive : ExtractorApi() {
         val bakalim = Regex("""&fmt_stream_map=(.*)&url_encoded_fmt_stream_map""")
             .find(iSource)?.groupValues?.get(1)
             ?: throw IllegalArgumentException("fmt_stream_map not found")
-        val decoded = bakalim.decodeUri()
+        
+        // decodeUri yerine Java'nın kendi URLDecoder'ı:
+        val decoded = URLDecoder.decode(bakalim, "UTF-8") 
+        
         val m3uLink = decoded.split("|").last()
         Log.d("Kekik_${this.name}", "m3uLink » $m3uLink")
 
