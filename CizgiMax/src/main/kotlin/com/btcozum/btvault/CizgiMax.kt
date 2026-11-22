@@ -313,7 +313,7 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        // --- 2 katmanlı servers base64 yakalama (try/catch ile) ---
+        // 2 katmanlı servers base64 yakalama
         val serversB64 = Regex(
             """(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(\s*atob\(\s*["']([^"']+)["']\s*\)\s*\)""",
             RegexOption.IGNORE_CASE
@@ -403,7 +403,6 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        // --- FIX: runCatching yerine try/catch + continue@serverLoop ---
         serverLoop@ for (srv in servers) {
             try {
                 val candidates = listOfNotNull(
@@ -425,20 +424,18 @@ class CizgiMax : MainAPI() {
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
 
-                    var response: com.lagradost.cloudstream3.AppResponse? = null
-                    try {
-                        response = app.get(
+                    // FIX: AppResponse tipini hiç anmadan doğrudan String'e indir
+                    val body = try {
+                        app.get(
                             fullUrl,
                             headers = iframeHeaders,
                             referer = targetPage,
                             timeout = 25
-                        )
+                        ).text.trim()
                     } catch (e: Exception) {
                         Log.d("Kekik_$name", "istek hatası ($fullUrl): ${e.message}")
+                        ""
                     }
-                    if (response == null) continue
-
-                    val body = response.text.trim()
                     if (body.isBlank()) continue
 
                     // JSON cevabı
@@ -484,4 +481,7 @@ class CizgiMax : MainAPI() {
                     if (!mp4Url.isNullOrBlank()) {
                         dispatchResolvedUrl(mp4Url, displayName, fullUrl)
                         continue@serverLoop
-           
+                    }
+
+                    // Google Drive
+                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body
