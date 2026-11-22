@@ -21,19 +21,28 @@ open class CizgiDuo : ExtractorApi() {
         val extRef = referer ?: ""
         val iSource = app.get(url, referer = extRef).text
 
-        val bePlayer = Regex("""bePlayer\('([^']+)',\s*'(\{[^}]+\})'\);""")
-            .find(iSource)?.groupValues
-            ?: throw ErrorLoadingException("bePlayer not found")
+        // GÜNCELLEME: bePlayer çağrısı boşluk/quote/tırnak farklarına toleranslı
+        val bePlayer = Regex(
+            """bePlayer\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"](\{.*?\})['"]\s*\)""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        ).find(iSource)?.groupValues
+            ?: Regex("""bePlayer\('([^']+)',\s*'(\{[^}]+\})'\);""").find(iSource)?.groupValues
+            ?: throw ErrorLoadingException("CizgiDuo: bePlayer bulunamadı")
+
         val bePlayerPass = bePlayer[1]
         val bePlayerData = bePlayer[2]
+
         val encrypted = AesHelper.cryptoAESHandler(bePlayerData, bePlayerPass.toByteArray(), false)
             ?.replace("\\", "")
-            ?: throw ErrorLoadingException("failed to decrypt")
-        Log.d("Kekik_${this.name}", "encrypted » $encrypted")
+            ?: throw ErrorLoadingException("CizgiDuo: AES şifre çözme başarısız")
+        Log.d("Kekik_${this.name}", "decrypted length=${encrypted.length}")
 
-        val m3uLink = Regex("""video_location":"([^"]+)""")
+        // GÜNCELLEME: m3u8 linkini daha esnek yakala (video_location veya doğrudan m3u8)
+        val m3uLink = Regex("""video_location"\s*:\s*"([^"]+)""")
             .find(encrypted)?.groupValues?.get(1)
-            ?: throw ErrorLoadingException("m3u link not found")
+            ?: Regex("""(https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)""", RegexOption.IGNORE_CASE)
+                .find(encrypted)?.groupValues?.get(1)
+            ?: throw ErrorLoadingException("CizgiDuo: m3u linki bulunamadı")
 
         callback.invoke(
             newExtractorLink(
