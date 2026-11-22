@@ -188,6 +188,76 @@ class CizgiMax : MainAPI() {
         return emptyList()
     }
 
+    private fun extractEpisodeList(doc: org.jsoup.nodes.Document, fixedUrl: String): List<Episode> {
+        val seriesSlug = fixedUrl
+            .removeSuffix("/")
+            .substringAfterLast("/")
+            .removeSuffix("-izle")
+
+        val fromLinks = doc.select("a[href]")
+            .mapNotNull { el ->
+                if (el.parents().any { it.hasClass("mob-sub-list") || it.tagName() == "nav" || it.tagName() == "footer" }) {
+                    return@mapNotNull null
+                }
+                val href = el.attr("href").trim()
+                if (href.isBlank() || href.startsWith("#") || href.startsWith("/#") || isCategoryOrNavUrl(href)) {
+                    return@mapNotNull null
+                }
+                val epUrl = fixRelativeUrl(href)
+                if (epUrl == fixedUrl || epUrl.contains("/diziler/")) return@mapNotNull null
+
+                val lowerHref = href.lowercase()
+                val matchesEpisode = lowerHref.contains("bolum") ||
+                    lowerHref.contains("sezon") ||
+                    lowerHref.contains("episode") ||
+                    (seriesSlug.isNotBlank() && lowerHref.contains(seriesSlug.lowercase()) && Regex("""\d+""").containsMatchIn(lowerHref))
+
+                if (!matchesEpisode) return@mapNotNull null
+
+                val epName = el.attr("title").trim()
+                    .ifBlank { el.text().trim() }
+                    .ifBlank { "Bölüm" }
+                val seasonNum = Regex("""(\d+)[\s_-]*sezon""", RegexOption.IGNORE_CASE)
+                    .find("$href $epName")?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val episodeNum = Regex("""(\d+)[\s_-]*b[oö]l[uü]m""", RegexOption.IGNORE_CASE)
+                    .find("$href $epName")?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+                newEpisode(epUrl) {
+                    name = epName
+                    season = seasonNum
+                    episode = episodeNum
+                }
+            }
+            .distinctBy { it.data }
+
+        if (fromLinks.isNotEmpty()) return fromLinks
+
+        // HTML içinde data-href veya gömülü bölüm URL'si varsa yakala
+        val htmlMatches = Regex("""/[^\s"'<>\\]*(?:sezon|bolum)[^\s"'<>\\]*""", RegexOption.IGNORE_CASE)
+            .findAll(doc.html())
+            .map { it.value }
+            .filter { !it.contains("/diziler/") && !isCategoryOrNavUrl(it) }
+            .distinct()
+            .map { rawPath ->
+                val epUrl = fixRelativeUrl(rawPath)
+                val seasonNum = Regex("""(\d+)-sezon""", RegexOption.IGNORE_CASE).find(rawPath)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val episodeNum = Regex("""(\d+)-bolum""", RegexOption.IGNORE_CASE).find(rawPath)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val label = when {
+                    seasonNum != null && episodeNum != null -> "$seasonNum. Sezon $episodeNum. Bölüm"
+                    episodeNum != null -> "$episodeNum. Bölüm"
+                    else -> rawPath.trim('/').replace('-', ' ')
+                }
+                newEpisode(epUrl) {
+                    name = label
+                    season = seasonNum
+                    episode = episodeNum
+                }
+            }
+            .toList()
+
+        return htmlMatches
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         val fixedUrl = fixRelativeUrl(url)
         val doc = app.get(fixedUrl, headers = defaultHeaders, referer = "$mainUrl/").document
@@ -208,25 +278,7 @@ class CizgiMax : MainAPI() {
         val plot = doc.selectFirst("meta[property='og:description']")?.attr("content")?.trim()
             ?: doc.selectFirst(".description, .synopsis, .plot, p")?.text()?.trim()
 
-        val episodeLinks = doc.select("a[href]")
-            .mapNotNull { el ->
-                val href = el.attr("href").trim()
-                if (href.isBlank() || href.startsWith("#") || href.startsWith("/#")) return@mapNotNull null
-                if (!href.contains("bolum", ignoreCase = true) && !href.contains("sezon", ignoreCase = true)) {
-                    return@mapNotNull null
-                }
-                val epUrl = fixRelativeUrl(href)
-                if (epUrl == fixedUrl) return@mapNotNull null
-                val epName = el.attr("title").trim().ifBlank { el.text().trim() }.ifBlank { "Bölüm" }
-                val seasonNum = Regex("""(\d+)-sezon""").find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val episodeNum = Regex("""(\d+)-bolum""").find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                newEpisode(epUrl) {
-                    name = epName
-                    season = seasonNum
-                    episode = episodeNum
-                }
-            }
-            .distinctBy { it.data }
+        val episodeLinks = extractEpisodeList(doc, fixedUrl)
 
         return if (episodeLinks.isNotEmpty() || fixedUrl.contains("/diziler/")) {
             newTvSeriesLoadResponse(title, fixedUrl, TvType.TvSeries, episodeLinks) {
@@ -247,9 +299,19 @@ class CizgiMax : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val targetPage = fixRelativeUrl(data)
-        val doc = app.get(targetPage, headers = defaultHeaders, referer = "$mainUrl/").document
-        val html = doc.html()
+        var targetPage = fixRelativeUrl(data)
+        var doc = app.get(targetPage, headers = defaultHeaders, referer = "$mainUrl/").document
+        var html = doc.html()
+
+        // Eğer doğrudan /diziler/... sayfasına gelindiyse ilk bölüm sayfasına yönlen
+        if (targetPage.contains("/diziler/")) {
+            val firstEpUrl = extractEpisodeList(doc, targetPage).firstOrNull()?.data
+            if (!firstEpUrl.isNullOrBlank()) {
+                targetPage = firstEpUrl
+                doc = app.get(targetPage, headers = defaultHeaders, referer = data).document
+                html = doc.html()
+            }
+        }
 
         val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
             .find(html) ?: return false
@@ -338,7 +400,6 @@ class CizgiMax : MainAPI() {
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
 
-                    // 302 yönlendirme varsa Location başlığını yakala
                     val noRedirectResp = runCatching {
                         app.get(
                             fullUrl,
