@@ -30,6 +30,13 @@ class CizgiMax : MainAPI() {
         TvType.Movie
     )
 
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "Son Bölümler",
+        "$mainUrl/diziler/" to "Diziler",
+        "$mainUrl/cizgi-film/" to "Çizgi Film",
+        "$mainUrl/anime/" to "Anime"
+    )
+
     private val defaultHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -98,7 +105,8 @@ class CizgiMax : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val targetUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+        val base = request.data.trimEnd('/')
+        val targetUrl = if (page <= 1) "$base/" else "$base/page/$page/"
         val doc = app.get(targetUrl, headers = defaultHeaders, referer = "$mainUrl/").document
 
         val candidates = doc.select(
@@ -120,12 +128,10 @@ class CizgiMax : MainAPI() {
                 .distinctBy { it.url }
         }
 
-        val homeSection = HomePageList(
-            name = request.name.ifBlank { "Son Bölümler" },
-            list = list
+        return newHomePageResponse(
+            list = listOf(HomePageList(name = request.name, list = list)),
+            hasNext = list.isNotEmpty()
         )
-
-        return newHomePageResponse(listOf(homeSection), hasNext = list.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
