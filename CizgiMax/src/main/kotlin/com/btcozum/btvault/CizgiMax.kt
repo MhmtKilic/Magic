@@ -1,6 +1,7 @@
 package com.btcozum.btvault
 
 import android.util.Base64
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
@@ -310,21 +311,46 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
-            .find(html) ?: return false
+        // --- GÜNCELLEME: Esnek sunucu listesi yakalama ---
+        // 1) Klasik format: var servers = JSON.parse(atob("..."))
+        // 2) Boşluk/quote farklılıklarına toleranslı
+        // 3) Genel atob("...") fallback: sadece decoded içeriği [ veya {" ile başlayanlar
+        val serversB64 = Regex(
+            """(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(\s*atob\(\s*["']([^"']+)["']\s*\)\s*\)""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.get(1)
+            ?: Regex(
+                """atob\(\s*["']([A-Za-z0-9+/=]{40,})["']\s*\)""",
+                RegexOption.IGNORE_CASE
+            ).findAll(html).mapNotNull { m ->
+                val raw = m.groupValues[1]
+                runCatching {
+                    val dec = String(Base64.decode(raw, Base64.DEFAULT), Charsets.UTF_8).trim()
+                    if (dec.startsWith("[") || dec.startsWith("{\"")) raw else null
+                }.getOrNull()
+            }.firstOrNull()
+
+        if (serversB64 == null) {
+            Log.d("Kekik_$name", "servers base64 bloğu bulunamadı")
+            return false
+        }
 
         val decodedJson = String(
-            Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
+            Base64.decode(serversB64, Base64.DEFAULT),
             Charsets.UTF_8
         )
 
         val servers = try {
             AppUtils.parseJson<List<CZServer>>(decodedJson)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.d("Kekik_$name", "servers JSON parse hatası: ${e.message}")
             emptyList()
         }
 
-        if (servers.isEmpty()) return false
+        if (servers.isEmpty()) {
+            Log.d("Kekik_$name", "servers listesi boş")
+            return false
+        }
 
         var foundLink = false
         val ua = defaultHeaders["User-Agent"]!!
@@ -405,6 +431,7 @@ class CizgiMax : MainAPI() {
                     val body = response.text.trim()
                     if (body.isBlank()) continue
 
+                    // JSON cevabı
                     if (body.startsWith("{")) {
                         val jsonObj = JSONObject(body)
                         val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
@@ -426,29 +453,28 @@ class CizgiMax : MainAPI() {
                         continue
                     }
 
-                    val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
-                    if (!m3u8Url.isNullOrBlank()) {
-                        dispatchResolvedUrl(m3u8Url, displayName, targetPage)
+                    // GÜNCELLEME: body doğrudan URL ise (redirect/JSON yerine düz URL)
+                    if (body.startsWith("http://") || body.startsWith("https://") && !body.contains("<")) {
+                        dispatchResolvedUrl(fixRelativeUrl(body), displayName, fullUrl)
                         return@runCatching
                     }
 
+                    // m3u8
+                    val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
+                    if (!m3u8Url.isNullOrBlank()) {
+                        dispatchResolvedUrl(m3u8Url, displayName, fullUrl)
+                        return@runCatching
+                    }
+
+                    // GÜNCELLEME: .mp4 de yakala
+                    val mp4Url = Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*""").find(body)?.value
+                    if (!mp4Url.isNullOrBlank()) {
+                        dispatchResolvedUrl(mp4Url, displayName, fullUrl)
+                        return@runCatching
+                    }
+
+                    // Google Drive preview
                     val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
                     if (!driveUrl.isNullOrBlank()) {
                         dispatchResolvedUrl(driveUrl, displayName, fullUrl)
-                        return@runCatching
-                    }
-
-                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                        .find(body)?.groupValues?.getOrNull(1)
-                    if (!iframeSrc.isNullOrBlank()) {
-                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
-                        return@runCatching
-                    }
-                }
-            }
-        }
-
-        return foundLink
-    }
-}
-
+                        return@runCatchi
