@@ -4,6 +4,6 @@
   "description": "CloudStream Turkce Eklenti Deposu - 31 eklenti (30 aktif): film, dizi, anime, belgesel, canli TV",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/plugin.json"
+    "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/plugins.json"
   ]
 }
