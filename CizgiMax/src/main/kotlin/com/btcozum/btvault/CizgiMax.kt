@@ -47,20 +47,43 @@ class CizgiMax : MainAPI() {
         }
     }
 
+    private fun isNoiseTitle(candidate: String): Boolean {
+        val clean = candidate.trim()
+        if (clean.isBlank()) return true
+        val blocked = setOf(
+            "çizgi", "çizgi film", "cizgi film", "anime", "dizi", "diziler",
+            "film", "filmler", "canlı tv", "tümü", "hepsi", "izle"
+        )
+        return clean.lowercase() in blocked
+    }
+
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = if (tagName() == "a") this else selectFirst("a[href]") ?: return null
         val href = linkEl.attr("href").trim()
         if (href.isBlank() || href.startsWith("#") || href.startsWith("/#")) return null
 
+        if (href.matches(
+                Regex("""^/(?:cizgi-film|anime|dizi|diziler|filmler|kategoriler|tur|etiket)/?$""", RegexOption.IGNORE_CASE)
+            )
+        ) {
+            return null
+        }
+
         val fullUrl = fixRelativeUrl(href)
-        val title = linkEl.attr("title").trim()
-            .ifBlank { selectFirst("h1, h2, h3, h4, .title, .name")?.text()?.trim() ?: "" }
-            .ifBlank { linkEl.text().trim() }
+        val imgEl = selectFirst("img")
+
+        val rawTitle = selectFirst(".title, .name, .series-title, .movie-title, h2, h3, h4")?.text()?.trim()
+            ?.takeIf { !isNoiseTitle(it) }
+            ?: imgEl?.attr("alt")?.trim()?.takeIf { !isNoiseTitle(it) }
+            ?: linkEl.attr("title").trim().takeIf { !isNoiseTitle(it) }
+            ?: linkEl.text().trim().takeIf { !isNoiseTitle(it) }
+            ?: ""
+
+        val title = rawTitle
             .replace(Regex("""\s*\|\s*CizgiMax.*$""", RegexOption.IGNORE_CASE), "")
             .trim()
-        if (title.isBlank()) return null
+        if (title.isBlank() || isNoiseTitle(title)) return null
 
-        val imgEl = selectFirst("img")
         val rawPoster = imgEl?.attr("data-src")?.takeIf { it.isNotBlank() }
             ?: imgEl?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
             ?: imgEl?.attr("src")?.takeIf { it.isNotBlank() }
@@ -130,15 +153,12 @@ class CizgiMax : MainAPI() {
                 .mapNotNull { it.toSearchResult() }
                 .distinctBy { it.url }
 
-            if (rawResults.isNotEmpty()) {
-                val filtered = if (queryTokens.isNotEmpty()) {
-                    rawResults.filter { item ->
-                        val hay = "${item.name} ${item.url}".lowercase()
-                        queryTokens.any { token -> hay.contains(token) }
-                    }
-                } else rawResults
-
-                return filtered.ifEmpty { rawResults }
+            if (rawResults.isNotEmpty() && queryTokens.isNotEmpty()) {
+                val matched = rawResults.filter { item ->
+                    val hay = "${item.name} ${item.url}".lowercase()
+                    queryTokens.any { token -> hay.contains(token) }
+                }
+                if (matched.isNotEmpty()) return matched
             }
         }
 
@@ -261,7 +281,6 @@ class CizgiMax : MainAPI() {
                 val body = response.text.trim()
                 if (body.isBlank()) return@runCatching
 
-                // 1. JSON yanıtı (/api/np-resolve/ veya stream JSON)
                 if (body.startsWith("{")) {
                     val jsonObj = JSONObject(body)
                     val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
@@ -312,7 +331,6 @@ class CizgiMax : MainAPI() {
                     return@runCatching
                 }
 
-                // 2. HTML veya metin içinde doğrudan .m3u8 akışı varsa
                 val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
                 if (!m3u8Url.isNullOrBlank()) {
                     foundLink = true
@@ -331,7 +349,6 @@ class CizgiMax : MainAPI() {
                     return@runCatching
                 }
 
-                // 3. HTML içinde Google Drive preview bağlantısı varsa
                 val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
                 if (!driveUrl.isNullOrBlank()) {
                     foundLink = true
@@ -352,7 +369,6 @@ class CizgiMax : MainAPI() {
                     return@runCatching
                 }
 
-                // 4. HTML içinde başka bir <iframe src="..."> varsa
                 val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
                     .find(body)?.groupValues?.getOrNull(1)
                 if (!iframeSrc.isNullOrBlank()) {
