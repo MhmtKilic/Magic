@@ -32,9 +32,16 @@ class CizgiMax : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Son Bölümler",
-        "$mainUrl/diziler/" to "Diziler",
-        "$mainUrl/cizgi-film/" to "Çizgi Film",
-        "$mainUrl/anime/" to "Anime"
+        "$mainUrl/diziler/cizgi-film/" to "Çizgi Film",
+        "$mainUrl/diziler/anime/" to "Anime",
+        "$mainUrl/diziler/dizi/" to "Dizi",
+        "$mainUrl/film/" to "Film",
+        "$mainUrl/tur/aksiyon/" to "Aksiyon",
+        "$mainUrl/tur/komedi/" to "Komedi",
+        "$mainUrl/tur/macera/" to "Macera",
+        "$mainUrl/tur/bilim-kurgu/" to "Bilim Kurgu",
+        "$mainUrl/tur/fantezi/" to "Fantezi",
+        "$mainUrl/tur/gizem/" to "Gizem"
     )
 
     private val defaultHeaders = mapOf(
@@ -64,15 +71,23 @@ class CizgiMax : MainAPI() {
         return clean.lowercase() in blocked
     }
 
+    private fun isCategoryOrNavUrl(href: String): Boolean {
+        val path = href.substringBefore("?").substringBefore("#").trim().lowercase()
+        return path.matches(
+            Regex(
+                """^/(?:diziler/(?:cizgi-film|anime|dizi)|cizgi-film|anime|dizi|diziler|film|filmler|tur/[^/]+|kategoriler|etiket)/?$"""
+            )
+        )
+    }
+
     private fun Element.toSearchResult(): SearchResponse? {
+        if (parents().any { it.hasClass("mob-sub-list") || it.tagName() == "nav" || it.tagName() == "footer" }) {
+            return null
+        }
+
         val linkEl = if (tagName() == "a") this else selectFirst("a[href]") ?: return null
         val href = linkEl.attr("href").trim()
-        if (href.isBlank() || href.startsWith("#") || href.startsWith("/#")) return null
-
-        if (href.matches(
-                Regex("""^/(?:cizgi-film|anime|dizi|diziler|filmler|kategoriler|tur|etiket)/?$""", RegexOption.IGNORE_CASE)
-            )
-        ) {
+        if (href.isBlank() || href.startsWith("#") || href.startsWith("/#") || isCategoryOrNavUrl(href)) {
             return null
         }
 
