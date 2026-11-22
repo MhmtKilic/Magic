@@ -16,6 +16,7 @@ import java.net.URLEncoder
 
 data class CZServer(
     val type: String? = null,
+    val src: String? = null,
     val streamUrl: String? = null,
     val label: String? = null,
     val embedId: Int? = null,
@@ -171,9 +172,9 @@ class CizgiMax : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val html = app.get(data, interceptor = interceptor).text
+        val html = app.get(data, referer = "${mainUrl}/", interceptor = interceptor).text
 
-        val base64Servers = Regex("""var\s+servers\s*=\s*JSON\.parse\(atob\("([^"]+)"\)\)""")
+        val base64Servers = Regex("""var\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
             .find(html)
             ?.groupValues?.get(1)
 
@@ -182,55 +183,71 @@ class CizgiMax : MainAPI() {
             ?.let { tryParseJson<List<CZServer>>(it) }
             ?: emptyList()
 
+        Log.d("CZGM", "servers » ${servers.size} (data » $data)")
+
         for (server in servers) {
-            val streamUrl = server.streamUrl ?: continue
-            val resolve = runCatching {
-                app.get(fixUrl(streamUrl), referer = data, interceptor = interceptor).parsedSafe<CZStream>()
-            }.getOrNull()
+            val targetPath = server.streamUrl?.takeIf { it.isNotBlank() }
+                ?: server.src?.takeIf { it.isNotBlank() }
 
-            resolve?.captions.orEmpty().forEach { caption ->
-                val subUrl = fixUrlNull(caption.url) ?: return@forEach
-                subtitleCallback.invoke(
-                    newSubtitleFile(
-                        lang = caption.name?.takeIf { it.isNotBlank() }
-                            ?: caption.lang?.takeIf { it.isNotBlank() }
-                            ?: "Altyazı",
-                        url = subUrl
+            if (!targetPath.isNullOrBlank()) {
+                val resolvedUrl = fixUrl(targetPath)
+                if (resolvedUrl.contains("/oynat/", ignoreCase = true)) {
+                    runCatching {
+                        loadExtractor(resolvedUrl, data, subtitleCallback, callback)
+                    }.onFailure {
+                        Log.w("CZGM", "oynat çözümlenemedi ($resolvedUrl): ${it.message}")
+                    }
+                    continue
+                }
+
+                val resolve = runCatching {
+                    app.get(resolvedUrl, referer = data, interceptor = interceptor).parsedSafe<CZStream>()
+                }.getOrNull()
+
+                resolve?.captions.orEmpty().forEach { caption ->
+                    val subUrl = fixUrlNull(caption.url) ?: return@forEach
+                    subtitleCallback.invoke(
+                        newSubtitleFile(
+                            lang = caption.name?.takeIf { it.isNotBlank() }
+                                ?: caption.lang?.takeIf { it.isNotBlank() }
+                                ?: "Altyazı",
+                            url = subUrl
+                        )
                     )
-                )
-            }
+                }
 
-            val qualities = resolve?.urls.orEmpty().filter { !it.url.isNullOrBlank() }
-            for (quality in qualities) {
-                val link = quality.url ?: continue
-                callback.invoke(
-                    newExtractorLink(
-                        source = server.label ?: name,
-                        name = "${server.label ?: name} ${quality.label ?: ""}".trim(),
-                        url = fixUrl(link),
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.headers = mapOf("Referer" to "${mainUrl}/")
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            }
-            if (qualities.isNotEmpty()) continue
+                val qualities = resolve?.urls.orEmpty().filter { !it.url.isNullOrBlank() }
+                for (quality in qualities) {
+                    val link = quality.url ?: continue
+                    callback.invoke(
+                        newExtractorLink(
+                            source = server.label ?: name,
+                            name = "${server.label ?: name} ${quality.label ?: ""}".trim(),
+                            url = fixUrl(link),
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = "${mainUrl}/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                }
+                if (qualities.isNotEmpty()) continue
 
-            val direct = resolve?.url
-            if (!direct.isNullOrBlank()) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = server.label ?: name,
-                        name = server.label ?: name,
-                        url = fixUrl(direct),
-                        type = if (direct.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.headers = mapOf("Referer" to "${mainUrl}/")
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                continue
+                val direct = resolve?.url
+                if (!direct.isNullOrBlank()) {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = server.label ?: name,
+                            name = server.label ?: name,
+                            url = fixUrl(direct),
+                            type = if (direct.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else INFER_TYPE
+                        ) {
+                            this.referer = "${mainUrl}/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    continue
+                }
             }
 
             val videoId = server.videoId
@@ -244,13 +261,12 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        for (frame in Jsoup.parse(html).select("iframe[src]")) {
-            val src = frame.attr("src").trim()
+        for (frame in Jsoup.parse(html).select("iframe[src], iframe[data-src]")) {
+            val src = frame.attr("src").ifBlank { frame.attr("data-src") }.trim()
             if (src.isBlank()) continue
             loadExtractor(fixUrl(src), "${mainUrl}/", subtitleCallback, callback)
         }
 
-        Log.d("CZGM", "servers » ${servers.size} (data » $data)")
         return true
     }
 }
