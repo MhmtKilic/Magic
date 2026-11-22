@@ -12,9 +12,11 @@ data class CZServer(
     val resolveUrl: String? = null,
     val streamUrl: String? = null,
     val metaUrl: String? = null,
+    val qualitiesUrl: String? = null,
     val label: String? = null,
     val lang: String? = null,
     val embedId: Int? = null,
+    val embedToken: String? = null,
     val notice: String? = null
 )
 
@@ -121,7 +123,7 @@ class CizgiMax : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val base = request.data.trimEnd('/')
-        val targetUrl = if (page <= 1) "$base/" else "$base/page/$page/"
+        val targetUrl = if (page <= 1) "$base/" else "$base/?page=$page"
         val doc = app.get(targetUrl, headers = defaultHeaders, referer = "$mainUrl/").document
 
         val candidates = doc.select(
@@ -273,141 +275,136 @@ class CizgiMax : MainAPI() {
         )
         val iframeHeaders = defaultHeaders + mapOf(
             "Referer" to targetPage,
+            "Origin" to mainUrl,
+            "X-Requested-With" to "XMLHttpRequest",
             "Sec-Fetch-Dest" to "iframe",
             "Sec-Fetch-Mode" to "navigate",
             "Sec-Fetch-Site" to "same-origin"
         )
 
+        suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
+            if (resolvedTarget.isBlank()) return
+            if (resolvedTarget.contains(".m3u8", ignoreCase = true)) {
+                foundLink = true
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = displayName,
+                        url = resolvedTarget,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = playerHeaders
+                    }
+                )
+            } else {
+                foundLink = true
+                loadExtractor(resolvedTarget, refUrl, subtitleCallback) { link ->
+                    callback(
+                        ExtractorLink(
+                            source = link.source.ifBlank { name },
+                            name = displayName,
+                            url = link.url,
+                            referer = link.referer.ifBlank { "$mainUrl/" },
+                            quality = link.quality,
+                            type = link.type,
+                            headers = link.headers.ifEmpty { playerHeaders },
+                            extractorData = link.extractorData
+                        )
+                    )
+                }
+            }
+        }
+
         for (srv in servers) {
             runCatching {
-                val rawTarget = srv.src?.takeIf { it.isNotBlank() }
-                    ?: srv.resolveUrl?.takeIf { it.isNotBlank() }
-                    ?: srv.streamUrl?.takeIf { it.isNotBlank() }
-                    ?: srv.metaUrl?.takeIf { it.isNotBlank() }
-                    ?: return@runCatching
+                val candidates = listOfNotNull(
+                    srv.src?.takeIf { it.isNotBlank() },
+                    srv.resolveUrl?.takeIf { it.isNotBlank() },
+                    srv.streamUrl?.takeIf { it.isNotBlank() },
+                    srv.metaUrl?.takeIf { it.isNotBlank() },
+                    srv.qualitiesUrl?.takeIf { it.isNotBlank() }
+                ).distinct()
 
-                val fullUrl = fixRelativeUrl(rawTarget)
+                if (candidates.isEmpty()) return@runCatching
+
                 val label = listOfNotNull(
                     srv.label?.takeIf { it.isNotBlank() },
                     srv.lang?.takeIf { it.isNotBlank() }?.let { "($it)" }
                 ).joinToString(" ").ifBlank { srv.type ?: name }
                 val displayName = "$name - $label"
 
-                val response = app.get(
-                    fullUrl,
-                    headers = iframeHeaders,
-                    referer = targetPage,
-                    timeout = 25
-                )
-                val body = response.text.trim()
-                if (body.isBlank()) return@runCatching
+                for (rawTarget in candidates) {
+                    val fullUrl = fixRelativeUrl(rawTarget)
 
-                if (body.startsWith("{")) {
-                    val jsonObj = JSONObject(body)
-                    val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
-                        ?: jsonObj.optString("src").takeIf { it.isNotBlank() }
-                        ?: jsonObj.optString("streamUrl").takeIf { it.isNotBlank() }
-                        ?: jsonObj.optString("file").takeIf { it.isNotBlank() }
+                    // 302 yönlendirme varsa Location başlığını yakala
+                    val noRedirectResp = runCatching {
+                        app.get(
+                            fullUrl,
+                            headers = iframeHeaders,
+                            referer = targetPage,
+                            allowRedirects = false,
+                            timeout = 20
+                        )
+                    }.getOrNull()
 
-                    val resolvedTarget = when {
-                        directUrl != null -> fixRelativeUrl(directUrl)
-                        jsonObj.optString("id").isNotBlank() && srv.type.equals("dzen", true) ->
-                            "https://dzen.ru/embed/${jsonObj.getString("id")}"
-                        else -> null
-                    }
-
-                    if (!resolvedTarget.isNullOrBlank()) {
-                        if (resolvedTarget.contains(".m3u8", ignoreCase = true)) {
-                            foundLink = true
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = displayName,
-                                    url = resolvedTarget,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "$mainUrl/"
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = playerHeaders
-                                }
-                            )
-                        } else {
-                            foundLink = true
-                            loadExtractor(resolvedTarget, targetPage, subtitleCallback) { link ->
-                                callback(
-                                    ExtractorLink(
-                                        source = link.source.ifBlank { name },
-                                        name = displayName,
-                                        url = link.url,
-                                        referer = link.referer.ifBlank { "$mainUrl/" },
-                                        quality = link.quality,
-                                        type = link.type,
-                                        headers = link.headers.ifEmpty { playerHeaders },
-                                        extractorData = link.extractorData
-                                    )
-                                )
-                            }
+                    val locationHeader = noRedirectResp?.headers?.get("Location")?.takeIf { it.isNotBlank() }
+                    if (locationHeader != null) {
+                        val fixedLoc = fixRelativeUrl(locationHeader)
+                        if (!fixedLoc.contains("/api/stream/", ignoreCase = true) && !fixedLoc.contains("/oynat", ignoreCase = true)) {
+                            dispatchResolvedUrl(fixedLoc, displayName, targetPage)
+                            return@runCatching
                         }
                     }
-                    return@runCatching
-                }
 
-                val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
-                if (!m3u8Url.isNullOrBlank()) {
-                    foundLink = true
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = displayName,
-                            url = m3u8Url,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                            this.headers = playerHeaders
-                        }
+                    val response = app.get(
+                        fullUrl,
+                        headers = iframeHeaders,
+                        referer = targetPage,
+                        timeout = 25
                     )
-                    return@runCatching
-                }
+                    val body = response.text.trim()
+                    if (body.isBlank()) continue
 
-                val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
-                if (!driveUrl.isNullOrBlank()) {
-                    foundLink = true
-                    loadExtractor(driveUrl, fullUrl, subtitleCallback) { link ->
-                        callback(
-                            ExtractorLink(
-                                source = link.source.ifBlank { name },
-                                name = displayName,
-                                url = link.url,
-                                referer = link.referer.ifBlank { fullUrl },
-                                quality = link.quality,
-                                type = link.type,
-                                headers = link.headers,
-                                extractorData = link.extractorData
-                            )
-                        )
+                    if (body.startsWith("{")) {
+                        val jsonObj = JSONObject(body)
+                        val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
+                            ?: jsonObj.optString("src").takeIf { it.isNotBlank() }
+                            ?: jsonObj.optString("streamUrl").takeIf { it.isNotBlank() }
+                            ?: jsonObj.optString("file").takeIf { it.isNotBlank() }
+
+                        val resolvedTarget = when {
+                            directUrl != null -> fixRelativeUrl(directUrl)
+                            jsonObj.optString("id").isNotBlank() && srv.type.equals("dzen", true) ->
+                                "https://dzen.ru/embed/${jsonObj.getString("id")}"
+                            else -> null
+                        }
+
+                        if (!resolvedTarget.isNullOrBlank()) {
+                            dispatchResolvedUrl(resolvedTarget, displayName, targetPage)
+                            return@runCatching
+                        }
+                        continue
                     }
-                    return@runCatching
-                }
 
-                val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                    .find(body)?.groupValues?.getOrNull(1)
-                if (!iframeSrc.isNullOrBlank()) {
-                    val fixedIframe = fixRelativeUrl(iframeSrc)
-                    foundLink = true
-                    loadExtractor(fixedIframe, fullUrl, subtitleCallback) { link ->
-                        callback(
-                            ExtractorLink(
-                                source = link.source.ifBlank { name },
-                                name = displayName,
-                                url = link.url,
-                                referer = link.referer.ifBlank { fullUrl },
-                                quality = link.quality,
-                                type = link.type,
-                                headers = link.headers,
-                                extractorData = link.extractorData
-                            )
-                        )
+                    val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
+                    if (!m3u8Url.isNullOrBlank()) {
+                        dispatchResolvedUrl(m3u8Url, displayName, targetPage)
+                        return@runCatching
+                    }
+
+                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
+                    if (!driveUrl.isNullOrBlank()) {
+                        dispatchResolvedUrl(driveUrl, displayName, fullUrl)
+                        return@runCatching
+                    }
+
+                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                        .find(body)?.groupValues?.getOrNull(1)
+                    if (!iframeSrc.isNullOrBlank()) {
+                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
+                        return@runCatching
                     }
                 }
             }
