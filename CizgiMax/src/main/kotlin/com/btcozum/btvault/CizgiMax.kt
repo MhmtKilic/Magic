@@ -310,43 +310,21 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        val csrfToken = doc.selectFirst("meta[name='csrf-token']")?.attr("content")?.trim().orEmpty()
-        val servers = mutableListOf<CZServer>()
-
         val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
-            .find(html)
-        if (b64Match != null) {
-            runCatching {
-                val decodedJson = String(
-                    Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
-                    Charsets.UTF_8
-                )
-                servers.addAll(AppUtils.parseJson<List<CZServer>>(decodedJson))
-            }
+            .find(html) ?: return false
+
+        val decodedJson = String(
+            Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
+            Charsets.UTF_8
+        )
+
+        val servers = try {
+            AppUtils.parseJson<List<CZServer>>(decodedJson)
+        } catch (_: Exception) {
+            emptyList()
         }
 
-        if (servers.isEmpty()) {
-            val byLangMatch = Regex("""(?:var|let|const)\s+serversByLang\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
-                .find(html)
-            if (byLangMatch != null) {
-                runCatching {
-                    val decodedMapJson = String(
-                        Base64.decode(byLangMatch.groupValues[1], Base64.DEFAULT),
-                        Charsets.UTF_8
-                    )
-                    val rootObj = JSONObject(decodedMapJson)
-                    val keys = rootObj.keys()
-                    while (keys.hasNext()) {
-                        val langKey = keys.next()
-                        val arr = rootObj.optJSONArray(langKey) ?: continue
-                        for (idx in 0 until arr.length()) {
-                            val itemStr = arr.getJSONObject(idx).toString()
-                            servers.add(AppUtils.parseJson<CZServer>(itemStr))
-                        }
-                    }
-                }
-            }
-        }
+        if (servers.isEmpty()) return false
 
         var foundLink = false
         val ua = defaultHeaders["User-Agent"]!!
@@ -354,14 +332,14 @@ class CizgiMax : MainAPI() {
             "User-Agent" to ua,
             "Referer" to "$mainUrl/"
         )
-        val iframeHeaders = buildMap {
-            putAll(defaultHeaders)
-            put("Referer", targetPage)
-            put("Accept", "*/*")
-            if (csrfToken.isNotBlank()) {
-                put("X-CSRF-Token", csrfToken)
-            }
-        }
+        val iframeHeaders = defaultHeaders + mapOf(
+            "Referer" to targetPage,
+            "Origin" to mainUrl,
+            "X-Requested-With" to "XMLHttpRequest",
+            "Sec-Fetch-Dest" to "iframe",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "same-origin"
+        )
 
         suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
             if (resolvedTarget.isBlank()) return
@@ -418,30 +396,6 @@ class CizgiMax : MainAPI() {
 
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
-
-                    val noRedirectResp = runCatching {
-                        app.get(
-                            fullUrl,
-                            headers = iframeHeaders,
-                            referer = targetPage,
-                            allowRedirects = false,
-                            timeout = 20
-                        )
-                    }.getOrNull()
-
-                    val locationHeader = noRedirectResp?.headers?.entries
-                        ?.firstOrNull { it.key.equals("location", ignoreCase = true) }
-                        ?.value
-                        ?.takeIf { it.isNotBlank() }
-
-                    if (locationHeader != null) {
-                        val fixedLoc = fixRelativeUrl(locationHeader)
-                        if (!fixedLoc.contains("/api/stream/", ignoreCase = true) && !fixedLoc.contains("/oynat", ignoreCase = true)) {
-                            dispatchResolvedUrl(fixedLoc, displayName, targetPage)
-                            return@runCatching
-                        }
-                    }
-
                     val response = app.get(
                         fullUrl,
                         headers = iframeHeaders,
@@ -478,4 +432,23 @@ class CizgiMax : MainAPI() {
                         return@runCatching
                     }
 
-                    val driveUrl = Regex("""https://dr
+                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
+                    if (!driveUrl.isNullOrBlank()) {
+                        dispatchResolvedUrl(driveUrl, displayName, fullUrl)
+                        return@runCatching
+                    }
+
+                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                        .find(body)?.groupValues?.getOrNull(1)
+                    if (!iframeSrc.isNullOrBlank()) {
+                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
+                        return@runCatching
+                    }
+                }
+            }
+        }
+
+        return foundLink
+    }
+}
+
