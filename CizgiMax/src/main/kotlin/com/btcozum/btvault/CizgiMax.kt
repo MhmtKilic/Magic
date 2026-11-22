@@ -3,6 +3,7 @@ package com.btcozum.btvault
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONObject
 import org.jsoup.nodes.Element
 
 data class CZServer(
@@ -200,11 +201,17 @@ class CizgiMax : MainAPI() {
 
         var emittedAny = false
 
-        servers.forEach { srv ->
+        val iframeHeaders = defaultHeaders + mapOf(
+            "Sec-Fetch-Dest" to "iframe",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "same-origin"
+        )
+
+        for (srv in servers) {
             val rawTarget = srv.src?.takeIf { it.isNotBlank() }
                 ?: srv.resolveUrl?.takeIf { it.isNotBlank() }
                 ?: srv.streamUrl?.takeIf { it.isNotBlank() }
-                ?: return@forEach
+                ?: continue
 
             val fullUrl = fixRelativeUrl(rawTarget)
             val displayName = listOfNotNull(
@@ -212,29 +219,104 @@ class CizgiMax : MainAPI() {
                 srv.lang?.takeIf { it.isNotBlank() }?.let { "($it)" }
             ).joinToString(" ").ifBlank { srv.type ?: "CizgiMax" }
 
-            val found = loadExtractor(
-                url = fullUrl,
-                referer = targetPage,
-                subtitleCallback = subtitleCallback,
-                callback = { link ->
-                    emittedAny = true
-                    callback(
-                        ExtractorLink(
-                            source = displayName,
-                            name = displayName,
-                            url = link.url,
-                            referer = link.referer.ifBlank { targetPage },
-                            quality = link.quality,
-                            type = link.type,
-                            headers = link.headers,
-                            extractorData = link.extractorData
-                        )
-                    )
+            val response = runCatching {
+                app.get(fullUrl, headers = iframeHeaders, referer = targetPage)
+            }.getOrNull() ?: continue
+
+            val body = response.text.trim()
+            if (body.isBlank()) continue
+
+            // 1. JSON yanıtı (/api/np-resolve/ -> {"id":"..."})
+            if (body.startsWith("{")) {
+                val jsonObj = runCatching { JSONObject(body) }.getOrNull()
+                val directUrl = jsonObj?.optString("url")?.takeIf { it.isNotBlank() }
+                    ?: jsonObj?.optString("src")?.takeIf { it.isNotBlank() }
+                    ?: jsonObj?.optString("streamUrl")?.takeIf { it.isNotBlank() }
+
+                val resolvedTarget = when {
+                    directUrl != null -> fixRelativeUrl(directUrl)
+                    jsonObj?.optString("id")?.isNotBlank() == true && srv.type.equals("dzen", true) ->
+                        "https://dzen.ru/embed/${jsonObj.getString("id")}"
+                    else -> null
                 }
-            )
-            if (found) emittedAny = true
+
+                if (resolvedTarget != null) {
+                    val ok = dispatchExtractedUrl(resolvedTarget, targetPage, displayName, subtitleCallback, callback)
+                    if (ok) emittedAny = true
+                }
+                continue
+            }
+
+            // 2. HTML içinde doğrudan .m3u8 akışı varsa (örn. Vidmoly proxy yanıtı)
+            val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)
+            if (m3u8Match != null) {
+                val m3u8Url = m3u8Match.value
+                emittedAny = true
+                callback(
+                    newExtractorLink(
+                        source = displayName,
+                        name = displayName,
+                        url = m3u8Url,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = fullUrl
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("User-Agent" to defaultHeaders["User-Agent"]!!)
+                    }
+                )
+                continue
+            }
+
+            // 3. HTML içinde Google Drive preview bağlantısı varsa
+            val driveMatch = Regex("""https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/preview""").find(body)
+            if (driveMatch != null) {
+                val drivePreviewUrl = driveMatch.value
+                val ok = dispatchExtractedUrl(drivePreviewUrl, fullUrl, displayName, subtitleCallback, callback)
+                if (ok) emittedAny = true
+                continue
+            }
+
+            // 4. HTML içinde gömülü başka bir <iframe src="..."> varsa
+            val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.getOrNull(1)
+            if (!iframeSrc.isNullOrBlank()) {
+                val fixedIframe = fixRelativeUrl(iframeSrc)
+                val ok = dispatchExtractedUrl(fixedIframe, fullUrl, displayName, subtitleCallback, callback)
+                if (ok) emittedAny = true
+            }
         }
 
         return emittedAny
+    }
+
+    private suspend fun dispatchExtractedUrl(
+        targetUrl: String,
+        referer: String,
+        displayName: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+        val extractorFound = loadExtractor(
+            url = targetUrl,
+            referer = referer,
+            subtitleCallback = subtitleCallback,
+            callback = { link ->
+                found = true
+                callback(
+                    ExtractorLink(
+                        source = displayName,
+                        name = displayName,
+                        url = link.url,
+                        referer = link.referer.ifBlank { referer },
+                        quality = link.quality,
+                        type = link.type,
+                        headers = link.headers,
+                        extractorData = link.extractorData
+                    )
+                )
+            }
+        )
+        return found || extractorFound
     }
 }
