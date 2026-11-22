@@ -4,6 +4,7 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 data class CZServer(
@@ -188,7 +189,7 @@ class CizgiMax : MainAPI() {
         return emptyList()
     }
 
-    private fun extractEpisodeList(doc: org.jsoup.nodes.Document, fixedUrl: String): List<Episode> {
+    private fun extractEpisodeList(doc: Document, fixedUrl: String): List<Episode> {
         val seriesSlug = fixedUrl
             .removeSuffix("/")
             .substringAfterLast("/")
@@ -309,6 +310,7 @@ class CizgiMax : MainAPI() {
             }
         }
 
+        val csrfToken = doc.selectFirst("meta[name='csrf-token']")?.attr("content")?.trim().orEmpty()
         val servers = mutableListOf<CZServer>()
 
         val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
@@ -323,7 +325,6 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        // servers boşsa serversByLang içinden kaynakları topla
         if (servers.isEmpty()) {
             val byLangMatch = Regex("""(?:var|let|const)\s+serversByLang\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
                 .find(html)
@@ -353,10 +354,14 @@ class CizgiMax : MainAPI() {
             "User-Agent" to ua,
             "Referer" to "$mainUrl/"
         )
-        val iframeHeaders = defaultHeaders + mapOf(
-            "Referer" to targetPage,
-            "Accept" to "*/*"
-        )
+        val iframeHeaders = buildMap {
+            putAll(defaultHeaders)
+            put("Referer", targetPage)
+            put("Accept", "*/*")
+            if (csrfToken.isNotBlank()) {
+                put("X-CSRF-Token", csrfToken)
+            }
+        }
 
         suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
             if (resolvedTarget.isBlank()) return
@@ -414,7 +419,6 @@ class CizgiMax : MainAPI() {
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
 
-                    // 302 Location başlığını büyük/küçük harf duyarsız yakala (ör. /oynat/?t=... -> sibnet.ru)
                     val noRedirectResp = runCatching {
                         app.get(
                             fullUrl,
@@ -474,5 +478,4 @@ class CizgiMax : MainAPI() {
                         return@runCatching
                     }
 
-                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
-   
+                    val driveUrl = Regex("""https://dr
