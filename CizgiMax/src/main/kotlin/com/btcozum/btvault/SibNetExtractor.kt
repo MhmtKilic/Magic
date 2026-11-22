@@ -19,9 +19,18 @@ open class SibNet : ExtractorApi() {
     ) {
         val extRef = referer ?: ""
         val iSource = app.get(url, referer = extRef).text
-        val rawSrc = Regex("""player.src\(\[\{src: "([^"]+)""")
+
+        // GÜNCELLEME: 3 katmanlı fallback
+        // 1) Klasik player.src([{src: "..."}]) formatı
+        // 2) src: "..." genel formatı (m3u8/mp4)
+        // 3) Sayfa içinde doğrudan m3u8/mp4 linki
+        val rawSrc = Regex("""player\.src\(\[\{src:\s*["']([^"']+)["']""")
             .find(iSource)?.groupValues?.get(1)
-            ?: throw ErrorLoadingException("m3u link not found")
+            ?: Regex("""src\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
+                .find(iSource)?.groupValues?.get(1)
+            ?: Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
+                .find(iSource)?.value
+            ?: throw ErrorLoadingException("SibNet: video kaynağı bulunamadı")
 
         val m3uLink = fixUrl(rawSrc)
         Log.d("Kekik_${this.name}", "m3uLink » $m3uLink")
