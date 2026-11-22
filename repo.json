@@ -1,9 +1,9 @@
 {
-  "name": "Magic",
-  "iconUrl": "https://raw.githubusercontent.com/MhmtKilic/Magic/main/icon.png",
-  "description": "MhmtKilic CloudStream Eklenti Deposu - CizgiMax",
+  "name": "BTVault",
+  "iconUrl": "https://raw.githubusercontent.com/baristomruk-max/BTVault/main/.github/assets/banner.svg",
+  "description": "CloudStream Turkce Eklenti Deposu - 31 eklenti (30 aktif): film, dizi, anime, belgesel, canli TV",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/plugins.json"
+    "https://raw.githubusercontent.com/baristomruk-max/BTVault/builds/plugins.json"
   ]
 }
