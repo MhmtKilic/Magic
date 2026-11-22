@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION", "DEPRECATION_ERROR")
+
 package com.btcozum.btvault
 
 import android.util.Base64
@@ -168,11 +170,9 @@ class CizgiMax : MainAPI() {
             .filter { it.length >= 2 }
 
         for (url in searchUrls) {
-            val doc = try {
+            val doc = runCatching {
                 app.get(url, headers = defaultHeaders, referer = "$mainUrl/").document
-            } catch (_: Exception) {
-                continue
-            }
+            }.getOrNull() ?: continue
 
             val rawResults = doc.select(
                 "a[href*='/diziler/'], a[href*='-bolum-izle'], a[href*='-sezon-'], .video-card, .movie-card, .poster-item, .series-card, article"
@@ -300,6 +300,8 @@ class CizgiMax : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.d("Kekik_$name", "loadLinks START data=$data")
+
         var targetPage = fixRelativeUrl(data)
         var doc = app.get(targetPage, headers = defaultHeaders, referer = "$mainUrl/").document
         var html = doc.html()
@@ -313,45 +315,29 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        // 2 katmanlı servers base64 yakalama
-        val serversB64 = Regex(
-            """(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(\s*atob\(\s*["']([^"']+)["']\s*\)\s*\)""",
-            RegexOption.IGNORE_CASE
-        ).find(html)?.groupValues?.get(1)
-            ?: Regex(
-                """atob\(\s*["']([A-Za-z0-9+/=]{40,})["']\s*\)""",
-                RegexOption.IGNORE_CASE
-            ).findAll(html).mapNotNull { m ->
-                val raw = m.groupValues[1]
-                try {
-                    val dec = String(Base64.decode(raw, Base64.DEFAULT), Charsets.UTF_8).trim()
-                    if (dec.startsWith("[") || dec.startsWith("{\"")) raw else null
-                } catch (_: Exception) {
-                    null
-                }
-            }.firstOrNull()
-
-        if (serversB64 == null) {
-            Log.d("Kekik_$name", "servers base64 bloğu bulunamadı")
+        val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
+            .find(html)
+        if (b64Match == null) {
+            Log.d("Kekik_$name", "b64Match NULL — servers regex tutmadı. HTML len=${html.length}")
             return false
         }
+        Log.d("Kekik_$name", "b64Match FOUND. b64 len=${b64Match.groupValues[1].length}")
 
         val decodedJson = String(
-            Base64.decode(serversB64, Base64.DEFAULT),
+            Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
             Charsets.UTF_8
         )
+        Log.d("Kekik_$name", "decoded preview=${decodedJson.take(300)}")
 
         val servers = try {
             AppUtils.parseJson<List<CZServer>>(decodedJson)
         } catch (e: Exception) {
-            Log.d("Kekik_$name", "servers JSON parse hatası: ${e.message}")
+            Log.d("Kekik_$name", "JSON parse HATASI: ${e.message}")
             emptyList()
         }
+        Log.d("Kekik_$name", "servers count=${servers.size}")
 
-        if (servers.isEmpty()) {
-            Log.d("Kekik_$name", "servers listesi boş")
-            return false
-        }
+        if (servers.isEmpty()) return false
 
         var foundLink = false
         val ua = defaultHeaders["User-Agent"]!!
@@ -370,6 +356,7 @@ class CizgiMax : MainAPI() {
 
         suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
             if (resolvedTarget.isBlank()) return
+            Log.d("Kekik_$name", ">>> DISPATCH: $displayName -> $resolvedTarget")
             if (resolvedTarget.contains(".m3u8", ignoreCase = true)) {
                 foundLink = true
                 callback(
@@ -403,8 +390,9 @@ class CizgiMax : MainAPI() {
             }
         }
 
-        serverLoop@ for (srv in servers) {
-            try {
+        for (srv in servers) {
+            Log.d("Kekik_$name", ">>> SRV type=${srv.type} label=${srv.label}")
+            runCatching {
                 val candidates = listOfNotNull(
                     srv.src?.takeIf { it.isNotBlank() },
                     srv.resolveUrl?.takeIf { it.isNotBlank() },
@@ -413,7 +401,8 @@ class CizgiMax : MainAPI() {
                     srv.qualitiesUrl?.takeIf { it.isNotBlank() }
                 ).distinct()
 
-                if (candidates.isEmpty()) continue@serverLoop
+                Log.d("Kekik_$name", "    candidates=${candidates.size}")
+                if (candidates.isEmpty()) return@runCatching
 
                 val label = listOfNotNull(
                     srv.label?.takeIf { it.isNotBlank() },
@@ -423,26 +412,19 @@ class CizgiMax : MainAPI() {
 
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
-
-                    // FIX: AppResponse tipini hiç anmadan doğrudan String'e indir
-                    val body = try {
-                        app.get(
-                            fullUrl,
-                            headers = iframeHeaders,
-                            referer = targetPage,
-                            timeout = 25
-                        ).text.trim()
-                    } catch (e: Exception) {
-                        Log.d("Kekik_$name", "istek hatası ($fullUrl): ${e.message}")
-                        ""
-                    }
+                    Log.d("Kekik_$name", "    GET $fullUrl")
+                    val response = app.get(
+                        fullUrl,
+                        headers = iframeHeaders,
+                        referer = targetPage,
+                        timeout = 25
+                    )
+                    val body = response.text.trim()
+                    Log.d("Kekik_$name", "    body len=${body.length} head=${body.take(120)}")
                     if (body.isBlank()) continue
 
-                    // JSON cevabı
                     if (body.startsWith("{")) {
-                        val jsonObj = try { JSONObject(body) } catch (_: Exception) { null }
-                        if (jsonObj == null) continue
-
+                        val jsonObj = JSONObject(body)
                         val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
                             ?: jsonObj.optString("src").takeIf { it.isNotBlank() }
                             ?: jsonObj.optString("streamUrl").takeIf { it.isNotBlank() }
@@ -457,31 +439,36 @@ class CizgiMax : MainAPI() {
 
                         if (!resolvedTarget.isNullOrBlank()) {
                             dispatchResolvedUrl(resolvedTarget, displayName, targetPage)
-                            continue@serverLoop
+                            return@runCatching
                         }
                         continue
                     }
 
-                    // Body doğrudan URL döndüyse
-                    if (body.startsWith("http://") ||
-                        (body.startsWith("https://") && !body.contains("<"))) {
-                        dispatchResolvedUrl(fixRelativeUrl(body), displayName, fullUrl)
-                        continue@serverLoop
-                    }
-
-                    // m3u8
                     val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
                     if (!m3u8Url.isNullOrBlank()) {
-                        dispatchResolvedUrl(m3u8Url, displayName, fullUrl)
-                        continue@serverLoop
+                        dispatchResolvedUrl(m3u8Url, displayName, targetPage)
+                        return@runCatching
                     }
 
-                    // mp4
-                    val mp4Url = Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*""").find(body)?.value
-                    if (!mp4Url.isNullOrBlank()) {
-                        dispatchResolvedUrl(mp4Url, displayName, fullUrl)
-                        continue@serverLoop
+                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
+                    if (!driveUrl.isNullOrBlank()) {
+                        dispatchResolvedUrl(driveUrl, displayName, fullUrl)
+                        return@runCatching
                     }
 
-                    // Google Drive
-                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body
+                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                        .find(body)?.groupValues?.getOrNull(1)
+                    if (!iframeSrc.isNullOrBlank()) {
+                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
+                        return@runCatching
+                    }
+                }
+            }.onFailure { e ->
+                Log.d("Kekik_$name", "    srv ${srv.type} HATA: ${e.message}")
+            }
+        }
+
+        Log.d("Kekik_$name", "loadLinks END foundLink=$foundLink")
+        return foundLink
+    }
+}
