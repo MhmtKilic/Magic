@@ -232,8 +232,7 @@ class CizgiMax : MainAPI() {
 
         if (fromLinks.isNotEmpty()) return fromLinks
 
-        // HTML içinde data-href veya gömülü bölüm URL'si varsa yakala
-        val htmlMatches = Regex("""/[^\s"'<>\\]*(?:sezon|bolum)[^\s"'<>\\]*""", RegexOption.IGNORE_CASE)
+        return Regex("""/[^\s"'<>\\]*(?:sezon|bolum)[^\s"'<>\\]*""", RegexOption.IGNORE_CASE)
             .findAll(doc.html())
             .map { it.value }
             .filter { !it.contains("/diziler/") && !isCategoryOrNavUrl(it) }
@@ -254,8 +253,6 @@ class CizgiMax : MainAPI() {
                 }
             }
             .toList()
-
-        return htmlMatches
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -303,7 +300,6 @@ class CizgiMax : MainAPI() {
         var doc = app.get(targetPage, headers = defaultHeaders, referer = "$mainUrl/").document
         var html = doc.html()
 
-        // Eğer doğrudan /diziler/... sayfasına gelindiyse ilk bölüm sayfasına yönlen
         if (targetPage.contains("/diziler/")) {
             val firstEpUrl = extractEpisodeList(doc, targetPage).firstOrNull()?.data
             if (!firstEpUrl.isNullOrBlank()) {
@@ -313,21 +309,43 @@ class CizgiMax : MainAPI() {
             }
         }
 
+        val servers = mutableListOf<CZServer>()
+
         val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
-            .find(html) ?: return false
-
-        val decodedJson = String(
-            Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
-            Charsets.UTF_8
-        )
-
-        val servers = try {
-            AppUtils.parseJson<List<CZServer>>(decodedJson)
-        } catch (_: Exception) {
-            emptyList()
+            .find(html)
+        if (b64Match != null) {
+            runCatching {
+                val decodedJson = String(
+                    Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
+                    Charsets.UTF_8
+                )
+                servers.addAll(AppUtils.parseJson<List<CZServer>>(decodedJson))
+            }
         }
 
-        if (servers.isEmpty()) return false
+        // servers boşsa serversByLang içinden kaynakları topla
+        if (servers.isEmpty()) {
+            val byLangMatch = Regex("""(?:var|let|const)\s+serversByLang\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
+                .find(html)
+            if (byLangMatch != null) {
+                runCatching {
+                    val decodedMapJson = String(
+                        Base64.decode(byLangMatch.groupValues[1], Base64.DEFAULT),
+                        Charsets.UTF_8
+                    )
+                    val rootObj = JSONObject(decodedMapJson)
+                    val keys = rootObj.keys()
+                    while (keys.hasNext()) {
+                        val langKey = keys.next()
+                        val arr = rootObj.optJSONArray(langKey) ?: continue
+                        for (idx in 0 until arr.length()) {
+                            val itemStr = arr.getJSONObject(idx).toString()
+                            servers.add(AppUtils.parseJson<CZServer>(itemStr))
+                        }
+                    }
+                }
+            }
+        }
 
         var foundLink = false
         val ua = defaultHeaders["User-Agent"]!!
@@ -337,11 +355,7 @@ class CizgiMax : MainAPI() {
         )
         val iframeHeaders = defaultHeaders + mapOf(
             "Referer" to targetPage,
-            "Origin" to mainUrl,
-            "X-Requested-With" to "XMLHttpRequest",
-            "Sec-Fetch-Dest" to "iframe",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Site" to "same-origin"
+            "Accept" to "*/*"
         )
 
         suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
@@ -400,6 +414,7 @@ class CizgiMax : MainAPI() {
                 for (rawTarget in candidates) {
                     val fullUrl = fixRelativeUrl(rawTarget)
 
+                    // 302 Location başlığını büyük/küçük harf duyarsız yakala (ör. /oynat/?t=... -> sibnet.ru)
                     val noRedirectResp = runCatching {
                         app.get(
                             fullUrl,
@@ -410,7 +425,11 @@ class CizgiMax : MainAPI() {
                         )
                     }.getOrNull()
 
-                    val locationHeader = noRedirectResp?.headers?.get("Location")?.takeIf { it.isNotBlank() }
+                    val locationHeader = noRedirectResp?.headers?.entries
+                        ?.firstOrNull { it.key.equals("location", ignoreCase = true) }
+                        ?.value
+                        ?.takeIf { it.isNotBlank() }
+
                     if (locationHeader != null) {
                         val fixedLoc = fixRelativeUrl(locationHeader)
                         if (!fixedLoc.contains("/api/stream/", ignoreCase = true) && !fixedLoc.contains("/oynat", ignoreCase = true)) {
@@ -456,21 +475,4 @@ class CizgiMax : MainAPI() {
                     }
 
                     val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
-                    if (!driveUrl.isNullOrBlank()) {
-                        dispatchResolvedUrl(driveUrl, displayName, fullUrl)
-                        return@runCatching
-                    }
-
-                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                        .find(body)?.groupValues?.getOrNull(1)
-                    if (!iframeSrc.isNullOrBlank()) {
-                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
-                        return@runCatching
-                    }
-                }
-            }
-        }
-
-        return foundLink
-    }
-}
+   
