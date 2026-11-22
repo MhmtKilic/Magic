@@ -93,7 +93,7 @@
             "keyiflerolsun"
         ],
         "description": "CizgiMax \u00e7izgi film ve dizi eklentisi.",
-        "fileSize": 34269,
+        "fileSize": 34866,
         "repositoryUrl": "https://github.com/MhmtKilic/Magic",
         "language": "tr",
         "tvTypes": [
@@ -101,7 +101,7 @@
         ],
         "iconUrl": "https://www.google.com/s2/favicons?domain=cizgimax.online&sz=%size%",
         "apiVersion": 1,
-        "fileHash": "sha256-5bd08ae48bf5a2b76e648d09d10f8f5fdf49a416bc80f4b44d77a98ea5b80942"
+        "fileHash": "sha256-1f161979ccbfdf619d5f01bc33229fc68125d05fcfddb6f4acb82e1601b60e5b"
     },
     {
         "url": "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/DDizi.cs3",
