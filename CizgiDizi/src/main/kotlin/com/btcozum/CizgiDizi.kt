@@ -85,7 +85,7 @@ class CizgiDizi : MainAPI() {
             return cachedCatalog
         }
 
-        val doc = app.get("$mainUrl/", headers = defaultHeaders).document
+        val doc = app.get("$mainUrl/", headers = defaultHeaders).documentLarge
         val jsonText = doc.select("script")
             .map { it.data().trim() }
             .firstOrNull { it.startsWith("[") && it.contains("\"href\"") && it.contains("\"poster\"") }
@@ -221,14 +221,14 @@ class CizgiDizi : MainAPI() {
             var seasonNum = 1
             var epNum: Int? = null
 
-            when {
-                parts.size >= 3 -> {
-                    seasonNum = parts[0].filter { it.isDigit() }.toIntOrNull() ?: 1
-                    epNum = parts[1].filter { it.isDigit() }.toIntOrNull()
-                }
-                parts.size >= 1 -> {
-                    epNum = parts[0].filter { it.isDigit() }.toIntOrNull()
-                }
+            val firstPart = parts.firstOrNull().orEmpty()
+            val secondPart = parts.getOrNull(1).orEmpty()
+
+            if (parts.size >= 3 && firstPart.all { it.isDigit() } && secondPart.all { it.isDigit() }) {
+                seasonNum = firstPart.toIntOrNull() ?: 1
+                epNum = secondPart.toIntOrNull()
+            } else if (firstPart.all { it.isDigit() }) {
+                epNum = firstPart.toIntOrNull()
             }
 
             val bestText = texts
@@ -253,7 +253,7 @@ class CizgiDizi : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val fixedUrl = fixRelativeUrl(url)
         val res = app.get(fixedUrl, headers = defaultHeaders, referer = "$mainUrl/")
-        val doc = res.document
+        val doc = res.documentLarge
 
         val catalogMatch = cachedCatalog.firstOrNull { it.url == fixedUrl }
 
@@ -363,7 +363,7 @@ class CizgiDizi : MainAPI() {
         val pageUrl = fixRelativeUrl(data)
         val pageRes = app.get(pageUrl, headers = defaultHeaders, referer = "$mainUrl/")
         val html = pageRes.text
-        val doc = pageRes.document
+        val doc = pageRes.documentLarge
 
         var foundAny = false
 
