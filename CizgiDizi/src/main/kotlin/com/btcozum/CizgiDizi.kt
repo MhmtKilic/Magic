@@ -79,6 +79,17 @@ class CizgiDizi : MainAPI() {
             .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
     }
 
+    private fun extractJsStringVar(html: String, varName: String): String {
+        val marker = "window.$varName"
+        val idx = html.indexOf(marker)
+        if (idx == -1) return ""
+        val afterEq = html.substring(idx + marker.length).substringAfter("=", "").trimStart()
+        if (afterEq.isEmpty()) return ""
+        val quote = afterEq.first()
+        if (quote != '"' && quote != '\'') return ""
+        return afterEq.substring(1).substringBefore(quote, "").trim()
+    }
+
     private suspend fun getCatalog(): List<CatalogItem> {
         val now = System.currentTimeMillis()
         if (cachedCatalog.isNotEmpty() && (now - lastCatalogFetchMs) < 10 * 60 * 1000L) {
@@ -150,8 +161,7 @@ class CizgiDizi : MainAPI() {
             }
         }
     }
-
-    override suspend fun getMainPage(
+        override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
@@ -196,7 +206,8 @@ class CizgiDizi : MainAPI() {
             tokens.all { token -> target.contains(token) }
         }.take(60).map { it.toSearchResponse() }
     }
-        private fun extractEpisodes(doc: Document, seriesUrl: String): List<Episode> {
+
+    private fun extractEpisodes(doc: Document, seriesUrl: String): List<Episode> {
         val basePath = seriesUrl.removePrefix(mainUrl).substringBefore("?").trimEnd('/')
         if (basePath.isBlank()) return emptyList()
 
@@ -301,10 +312,19 @@ class CizgiDizi : MainAPI() {
             referer = pageUrl
         )
         val playerHtml = playerRes.text
-        val bridgeKey = Regex("""cvdBridgeKey\s*=\s*['"](.*?)['"]""")
-            .find(playerHtml)?.groupValues?.getOrNull(1)?.trim()
-            ?: embedUrl.substringAfter("k=", "").substringBefore("&").trim()
 
+        var bridgeKey = ""
+        val keyIdx = playerHtml.indexOf("cvdBridgeKey")
+        if (keyIdx != -1) {
+            val afterEq = playerHtml.substring(keyIdx + 12).substringAfter("=", "").trimStart()
+            val q = afterEq.firstOrNull()
+            if (q == '"' || q == '\'') {
+                bridgeKey = afterEq.substring(1).substringBefore(q, "").trim()
+            }
+        }
+        if (bridgeKey.isBlank()) {
+            bridgeKey = embedUrl.substringAfter("k=", "").substringBefore("&").trim()
+        }
         if (bridgeKey.isBlank()) return false
 
         val authHeaders = mapOf(
@@ -412,14 +432,13 @@ class CizgiDizi : MainAPI() {
             return foundAny
         }
 
-        val diziId = Regex("""window\.__diziid\s*=\s*['"](.*?)['"]""")
-            .find(html)?.groupValues?.getOrNull(1)?.trim()
-        val epKey = Regex("""window\.__cvdVideoEpisodeKey\s*=\s*['"](.*?)['"]""")
-            .find(html)?.groupValues?.getOrNull(1)?.trim()
-            ?: Regex("""window\.__bolum\s*=\s*['"](.*?)['"]""")
-                .find(html)?.groupValues?.getOrNull(1)?.trim()
+        val diziId = extractJsStringVar(html, "__diziid")
+            .ifBlank { pageUrl.removePrefix(mainUrl).trim('/').split("/").getOrNull(1).orEmpty() }
+        val epKey = extractJsStringVar(html, "__cvdVideoEpisodeKey")
+            .ifBlank { extractJsStringVar(html, "__bolum") }
+            .ifBlank { pageUrl.removePrefix(mainUrl).trim('/').split("/").getOrNull(3).orEmpty() }
 
-        if (!diziId.isNullOrBlank() && !epKey.isNullOrBlank()) {
+        if (diziId.isNotBlank() && epKey.isNotBlank()) {
             val vsUrl = "$mainUrl/diziyeni/video_sources.php?s=$diziId&b=$epKey"
             val vsText = app.get(
                 vsUrl,
