@@ -83,6 +83,27 @@
         "fileHash": "sha256-0d95ea6ae4ccc97a711998bc523c7d25e3ffa673abdc4554b86d6228ff7764c1"
     },
     {
+        "url": "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/CizgiDizi.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "CizgiDizi",
+        "internalName": "CizgiDizi",
+        "authors": [
+            "BTcozum",
+            "keyiflerolsun"
+        ],
+        "description": "CizgiDizi \u00e7izgi film ve dizi eklentisi.",
+        "fileSize": 28778,
+        "repositoryUrl": "https://github.com/MhmtKilic/Magic",
+        "language": "tr",
+        "tvTypes": [
+            "Cartoon"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=cizgimax.online&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-ba89e3ccb8cfa712a73c0ddddb26c4c4c1dc6d43eecc6c95db0c9fabd30d51e5"
+    },
+    {
         "url": "https://raw.githubusercontent.com/MhmtKilic/Magic/builds/CizgiMax.cs3",
         "status": 1,
         "version": 5,
