@@ -3,30 +3,16 @@
 package com.btcozum.btvault
 
 import android.util.Base64
-import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
+import java.text.Normalizer
 
-data class CZServer(
-    val type: String? = null,
-    val src: String? = null,
-    val resolveUrl: String? = null,
-    val streamUrl: String? = null,
-    val metaUrl: String? = null,
-    val qualitiesUrl: String? = null,
-    val label: String? = null,
-    val lang: String? = null,
-    val embedId: Int? = null,
-    val embedToken: String? = null,
-    val notice: String? = null
-)
-
-class CizgiMax : MainAPI() {
-    override var mainUrl = "https://cizgimax.online"
-    override var name = "CizgiMax"
+class CizgiDizi : MainAPI() {
+    override var mainUrl = "https://cizgivedizi.net"
+    override var name = "CizgiDizi"
     override val hasMainPage = true
     override var lang = "tr"
     override val supportedTypes = setOf(
@@ -36,25 +22,38 @@ class CizgiMax : MainAPI() {
         TvType.Movie
     )
 
+    private val videoOrigin = "https://cizgivedizi.net"
+
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Son Bölümler",
-        "$mainUrl/diziler/cizgi-film/" to "Çizgi Film",
-        "$mainUrl/diziler/anime/" to "Anime",
-        "$mainUrl/diziler/dizi/" to "Dizi",
-        "$mainUrl/film/" to "Film",
-        "$mainUrl/tur/aksiyon/" to "Aksiyon",
-        "$mainUrl/tur/komedi/" to "Komedi",
-        "$mainUrl/tur/macera/" to "Macera",
-        "$mainUrl/tur/bilim-kurgu/" to "Bilim Kurgu",
-        "$mainUrl/tur/fantezi/" to "Fantezi",
-        "$mainUrl/tur/gizem/" to "Gizem"
+        "all" to "Tümü",
+        "cizgi" to "Çizgi Dizi",
+        "anime" to "Anime",
+        "dizi" to "Dizi",
+        "film" to "Film"
     )
 
     private val defaultHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language" to "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
     )
+
+    private data class CatalogItem(
+        val title: String,
+        val url: String,
+        val poster: String?,
+        val type: String,
+        val isAnime: Boolean,
+        val hay: String,
+        val hayEn: String,
+        val genres: List<String>
+    )
+
+    @Volatile
+    private var cachedCatalog: List<CatalogItem> = emptyList()
+
+    @Volatile
+    private var lastCatalogFetchMs: Long = 0L
 
     private fun fixRelativeUrl(rawUrl: String): String {
         val trimmed = rawUrl.trim()
@@ -67,58 +66,88 @@ class CizgiMax : MainAPI() {
         }
     }
 
-    private fun isNoiseTitle(candidate: String): Boolean {
-        val clean = candidate.trim()
-        if (clean.isBlank()) return true
-        val blocked = setOf(
-            "çizgi", "çizgi film", "cizgi film", "anime", "dizi", "diziler",
-            "film", "filmler", "canlı tv", "tümü", "hepsi", "izle"
-        )
-        return clean.lowercase() in blocked
+    private fun normalizeTr(input: String): String {
+        val lower = input.lowercase()
+            .replace('ı', 'i')
+            .replace('İ', 'i')
+            .replace('ğ', 'g')
+            .replace('ü', 'u')
+            .replace('ş', 's')
+            .replace('ö', 'o')
+            .replace('ç', 'c')
+        return Normalizer.normalize(lower, Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
     }
 
-    private fun isCategoryOrNavUrl(href: String): Boolean {
-        val path = href.substringBefore("?").substringBefore("#").trim().lowercase()
-        return path.matches(
-            Regex(
-                """^/(?:diziler/(?:cizgi-film|anime|dizi)|cizgi-film|anime|dizi|diziler|film|filmler|tur/[^/]+|kategoriler|etiket)/?$"""
+    private suspend fun getCatalog(): List<CatalogItem> {
+        val now = System.currentTimeMillis()
+        if (cachedCatalog.isNotEmpty() && (now - lastCatalogFetchMs) < 10 * 60 * 1000L) {
+            return cachedCatalog
+        }
+
+        val doc = app.get("$mainUrl/", headers = defaultHeaders).document
+        val jsonText = doc.select("script")
+            .map { it.data().trim() }
+            .firstOrNull { it.startsWith("[") && it.contains("\"href\"") && it.contains("\"poster\"") }
+            ?: return cachedCatalog
+
+        val arr = JSONArray(jsonText)
+        val parsed = ArrayList<CatalogItem>(arr.length())
+
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val href = obj.optString("href").trim()
+            val label = obj.optString("label").trim()
+            if (href.isBlank() || label.isBlank()) continue
+
+            val ds = obj.optJSONObject("dataset") ?: JSONObject()
+            val type = ds.optString("type").trim().lowercase()
+            val isAnime = ds.optString("anime") == "1" || type == "anime"
+            val hay = ds.optString("hay")
+            val hayEn = ds.optString("hayEn")
+            val genresRaw = ds.optString("genresraw")
+            val genres = genresRaw.split("|").map { it.trim() }.filter { it.isNotBlank() }
+
+            val poster = obj.optString("poster").trim().takeIf { it.isNotBlank() }?.let { fixRelativeUrl(it) }
+            val fullUrl = fixRelativeUrl(href)
+
+            parsed.add(
+                CatalogItem(
+                    title = label,
+                    url = fullUrl,
+                    poster = poster,
+                    type = type,
+                    isAnime = isAnime,
+                    hay = hay,
+                    hayEn = hayEn,
+                    genres = genres
+                )
             )
-        )
+        }
+
+        if (parsed.isNotEmpty()) {
+            cachedCatalog = parsed
+            lastCatalogFetchMs = now
+        }
+        return cachedCatalog
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        if (parents().any { it.hasClass("mob-sub-list") || it.tagName() == "nav" || it.tagName() == "footer" }) {
-            return null
+    private fun CatalogItem.toSearchResponse(): SearchResponse {
+        val isMovie = type == "film" || url.contains("/film/")
+        val tvType = when {
+            isMovie -> TvType.Movie
+            isAnime -> TvType.Anime
+            type == "cizgi" -> TvType.Cartoon
+            else -> TvType.TvSeries
         }
-
-        val linkEl = if (tagName() == "a") this else selectFirst("a[href]") ?: return null
-        val href = linkEl.attr("href").trim()
-        if (href.isBlank() || href.startsWith("#") || href.startsWith("/#") || isCategoryOrNavUrl(href)) {
-            return null
-        }
-
-        val fullUrl = fixRelativeUrl(href)
-        val imgEl = selectFirst("img")
-
-        val rawTitle = selectFirst(".title, .name, .series-title, .movie-title, h2, h3, h4")?.text()?.trim()
-            ?.takeIf { !isNoiseTitle(it) }
-            ?: imgEl?.attr("alt")?.trim()?.takeIf { !isNoiseTitle(it) }
-            ?: linkEl.attr("title").trim().takeIf { !isNoiseTitle(it) }
-            ?: linkEl.text().trim().takeIf { !isNoiseTitle(it) }
-            ?: ""
-
-        val title = rawTitle
-            .replace(Regex("""\s*\|\s*CizgiMax.*$""", RegexOption.IGNORE_CASE), "")
-            .trim()
-        if (title.isBlank() || isNoiseTitle(title)) return null
-
-        val rawPoster = imgEl?.attr("data-src")?.takeIf { it.isNotBlank() }
-            ?: imgEl?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
-            ?: imgEl?.attr("src")?.takeIf { it.isNotBlank() }
-        val posterUrl = rawPoster?.let { fixRelativeUrl(it) }
-
-        return newTvSeriesSearchResponse(title, fullUrl, TvType.Cartoon) {
-            this.posterUrl = posterUrl
+        return if (isMovie) {
+            newMovieSearchResponse(title, url, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        } else {
+            newTvSeriesSearchResponse(title, url, tvType) {
+                this.posterUrl = poster
+            }
         }
     }
 
@@ -126,32 +155,30 @@ class CizgiMax : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val base = request.data.trimEnd('/')
-        val targetUrl = if (page <= 1) "$base/" else "$base/?page=$page"
-        val doc = app.get(targetUrl, headers = defaultHeaders, referer = "$mainUrl/").document
-
-        val candidates = doc.select(
-            "a[href*='/diziler/'], a[href*='-bolum-izle'], a[href*='-sezon-'], .video-card, .movie-card, .poster-item, .series-card, article"
-        )
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { it.url }
-
-        val list = if (candidates.isNotEmpty()) {
-            candidates
-        } else {
-            doc.select("a[href]")
-                .mapNotNull { el ->
-                    val href = el.attr("href").trim()
-                    if (href.matches(Regex("""^/(?:diziler/[^?#]+|[^?#]+-(?:sezon|bolum)-[^?#]+)/?$"""))) {
-                        el.toSearchResult()
-                    } else null
-                }
-                .distinctBy { it.url }
+        val catalog = getCatalog()
+        val filtered = when (request.data) {
+            "cizgi" -> catalog.filter { it.type == "cizgi" && !it.isAnime }
+            "anime" -> catalog.filter { it.isAnime }
+            "dizi" -> catalog.filter { it.type == "dizi" && !it.isAnime }
+            "film" -> catalog.filter { it.type == "film" || it.url.contains("/film/") }
+            else -> catalog
         }
 
+        val pageSize = 36
+        val fromIndex = (page - 1) * pageSize
+        if (fromIndex >= filtered.size) {
+            return newHomePageResponse(
+                list = listOf(HomePageList(name = request.name, list = emptyList())),
+                hasNext = false
+            )
+        }
+
+        val toIndex = minOf(fromIndex + pageSize, filtered.size)
+        val pageItems = filtered.subList(fromIndex, toIndex).map { it.toSearchResponse() }
+
         return newHomePageResponse(
-            list = listOf(HomePageList(name = request.name, list = list)),
-            hasNext = list.isNotEmpty()
+            list = listOf(HomePageList(name = request.name, list = pageItems)),
+            hasNext = toIndex < filtered.size
         )
     }
 
@@ -159,139 +186,172 @@ class CizgiMax : MainAPI() {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return emptyList()
 
-        val encoded = java.net.URLEncoder.encode(cleanQuery, "UTF-8")
-        val searchUrls = listOf(
-            "$mainUrl/ara/?q=$encoded",
-            "$mainUrl/?s=$encoded"
+        val normQuery = normalizeTr(cleanQuery)
+        val tokens = normQuery.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return emptyList()
+
+        val catalog = getCatalog()
+        return catalog.filter { item ->
+            val target = normalizeTr("${item.title} ${item.hay} ${item.hayEn}")
+            tokens.all { token -> target.contains(token) }
+        }.take(60).map { it.toSearchResponse() }
+    }
+        private fun extractEpisodes(doc: Document, seriesUrl: String): List<Episode> {
+        val basePath = seriesUrl.removePrefix(mainUrl).substringBefore("?").trimEnd('/')
+        if (basePath.isBlank()) return emptyList()
+
+        val grouped = LinkedHashMap<String, MutableList<String>>()
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("href").trim().substringBefore("?").substringBefore("#")
+            if (!href.startsWith("$basePath/")) continue
+
+            val rel = href.removePrefix("$basePath/").trim('/')
+            if (rel.isBlank()) continue
+
+            val fullEpUrl = fixRelativeUrl(href)
+            val text = a.text().trim()
+            grouped.getOrPut(fullEpUrl) { mutableListOf() }.add(text)
+        }
+
+        val episodes = ArrayList<Episode>(grouped.size)
+        for ((epUrl, texts) in grouped) {
+            val rel = epUrl.removePrefix(seriesUrl.trimEnd('/')).trim('/')
+            val parts = rel.split("/").filter { it.isNotBlank() }
+
+            var seasonNum = 1
+            var epNum: Int? = null
+
+            when {
+                parts.size >= 3 -> {
+                    seasonNum = parts[0].filter { it.isDigit() }.toIntOrNull() ?: 1
+                    epNum = parts[1].filter { it.isDigit() }.toIntOrNull()
+                }
+                parts.size >= 1 -> {
+                    epNum = parts[0].filter { it.isDigit() }.toIntOrNull()
+                }
+            }
+
+            val bestText = texts
+                .map { it.replace(Regex("\\s+"), " ").trim() }
+                .filter { it.isNotBlank() && !it.startsWith("\"") }
+                .minByOrNull { it.length }
+                ?: texts.firstOrNull { it.isNotBlank() }
+                ?: "Bölüm ${epNum ?: (episodes.size + 1)}"
+
+            episodes.add(
+                newEpisode(epUrl) {
+                    this.name = bestText
+                    this.season = seasonNum
+                    this.episode = epNum
+                }
+            )
+        }
+
+        return episodes
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val fixedUrl = fixRelativeUrl(url)
+        val res = app.get(fixedUrl, headers = defaultHeaders, referer = "$mainUrl/")
+        val doc = res.document
+
+        val catalogMatch = cachedCatalog.firstOrNull { it.url == fixedUrl }
+
+        val rawTitle = doc.selectFirst("h1")?.text()?.trim()
+            ?: catalogMatch?.title
+            ?: doc.title().substringBefore("Türkçe İzle").substringBefore("İzle").trim()
+
+        val poster = catalogMatch?.poster
+            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixRelativeUrl(it) }
+            ?: doc.selectFirst("img[src*='/resim/']")?.attr("src")?.let { fixRelativeUrl(it) }
+
+        val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()
+            ?: doc.select("p").map { it.text().trim() }.firstOrNull { it.length > 40 }
+
+        val tags = catalogMatch?.genres ?: emptyList()
+
+        val isMovie = fixedUrl.contains("/film/") || doc.selectFirst("[data-embeds]") != null
+        if (isMovie) {
+            return newMovieLoadResponse(rawTitle, fixedUrl, TvType.Movie, fixedUrl) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.tags = tags
+            }
+        }
+
+        val episodes = extractEpisodes(doc, fixedUrl)
+        val tvType = if (catalogMatch?.isAnime == true) TvType.Anime else TvType.Cartoon
+
+        return newTvSeriesLoadResponse(rawTitle, fixedUrl, tvType, episodes) {
+            this.posterUrl = poster
+            this.plot = plot
+            this.tags = tags
+        }
+    }
+
+    private suspend fun resolveCenterPlayer(
+        embedUrl: String,
+        pageUrl: String,
+        sourceLabel: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val playerRes = app.get(
+            embedUrl,
+            headers = defaultHeaders,
+            referer = pageUrl
+        )
+        val bridgeKey = Regex("""cvdBridgeKey\s*=\s*["']([^"']+)["']""")
+            .find(playerRes.text)?.groupValues?.get(1)
+            ?: return
+
+        val authHeaders = mapOf(
+            "User-Agent" to defaultHeaders["User-Agent"]!!,
+            "Accept" to "*/*",
+            "Accept-Language" to defaultHeaders["Accept-Language"]!!,
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/",
+            "Sec-Fetch-Dest" to "empty",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "same-site"
         )
 
-        val queryTokens = cleanQuery.lowercase()
-            .split(Regex("""\s+"""))
-            .filter { it.length >= 2 }
+        val authRes = app.get(
+            "$videoOrigin/yetki.php?k=$bridgeKey",
+            headers = authHeaders
+        )
 
-        for (url in searchUrls) {
-            val doc = runCatching {
-                app.get(url, headers = defaultHeaders, referer = "$mainUrl/").document
-            }.getOrNull() ?: continue
+        val videoPath = authRes.headers["X-CVD-Video-URL"]?.trim().orEmpty()
+        if (videoPath.isBlank()) return
 
-            val rawResults = doc.select(
-                "a[href*='/diziler/'], a[href*='-bolum-izle'], a[href*='-sezon-'], .video-card, .movie-card, .poster-item, .series-card, article"
-            )
-                .mapNotNull { it.toSearchResult() }
-                .distinctBy { it.url }
+        val cookieHeader = authRes.cookies
+            .map { (k, v) -> "$k=$v" }
+            .joinToString("; ")
 
-            if (rawResults.isNotEmpty() && queryTokens.isNotEmpty()) {
-                val matched = rawResults.filter { item ->
-                    val hay = "${item.name} ${item.url}".lowercase()
-                    queryTokens.any { token -> hay.contains(token) }
-                }
-                if (matched.isNotEmpty()) return matched
+        val streamUrl = if (videoPath.startsWith("http")) videoPath else "$videoOrigin$videoPath"
+
+        val streamHeaders = buildMap {
+            put("User-Agent", defaultHeaders["User-Agent"]!!)
+            put("Accept", "*/*")
+            put("Sec-Fetch-Dest", "video")
+            put("Sec-Fetch-Mode", "no-cors")
+            put("Sec-Fetch-Site", "same-site")
+            if (cookieHeader.isNotBlank()) {
+                put("Cookie", cookieHeader)
             }
         }
 
-        return emptyList()
-    }
-
-    private fun extractEpisodeList(doc: Document, fixedUrl: String): List<Episode> {
-        val seriesSlug = fixedUrl
-            .removeSuffix("/")
-            .substringAfterLast("/")
-            .removeSuffix("-izle")
-
-        val fromLinks = doc.select("a[href]")
-            .mapNotNull { el ->
-                if (el.parents().any { it.hasClass("mob-sub-list") || it.tagName() == "nav" || it.tagName() == "footer" }) {
-                    return@mapNotNull null
-                }
-                val href = el.attr("href").trim()
-                if (href.isBlank() || href.startsWith("#") || href.startsWith("/#") || isCategoryOrNavUrl(href)) {
-                    return@mapNotNull null
-                }
-                val epUrl = fixRelativeUrl(href)
-                if (epUrl == fixedUrl || epUrl.contains("/diziler/")) return@mapNotNull null
-
-                val lowerHref = href.lowercase()
-                val matchesEpisode = lowerHref.contains("bolum") ||
-                    lowerHref.contains("sezon") ||
-                    lowerHref.contains("episode") ||
-                    (seriesSlug.isNotBlank() && lowerHref.contains(seriesSlug.lowercase()) && Regex("""\d+""").containsMatchIn(lowerHref))
-
-                if (!matchesEpisode) return@mapNotNull null
-
-                val epName = el.attr("title").trim()
-                    .ifBlank { el.text().trim() }
-                    .ifBlank { "Bölüm" }
-                val seasonNum = Regex("""(\d+)[\s_-]*sezon""", RegexOption.IGNORE_CASE)
-                    .find("$href $epName")?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val episodeNum = Regex("""(\d+)[\s_-]*b[oö]l[uü]m""", RegexOption.IGNORE_CASE)
-                    .find("$href $epName")?.groupValues?.getOrNull(1)?.toIntOrNull()
-
-                newEpisode(epUrl) {
-                    name = epName
-                    season = seasonNum
-                    episode = episodeNum
-                }
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = sourceLabel,
+                url = streamUrl,
+                type = ExtractorLinkType.VIDEO
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+                this.headers = streamHeaders
             }
-            .distinctBy { it.data }
-
-        if (fromLinks.isNotEmpty()) return fromLinks
-
-        return Regex("""/[^\s"'<>\\]*(?:sezon|bolum)[^\s"'<>\\]*""", RegexOption.IGNORE_CASE)
-            .findAll(doc.html())
-            .map { it.value }
-            .filter { !it.contains("/diziler/") && !isCategoryOrNavUrl(it) }
-            .distinct()
-            .map { rawPath ->
-                val epUrl = fixRelativeUrl(rawPath)
-                val seasonNum = Regex("""(\d+)-sezon""", RegexOption.IGNORE_CASE).find(rawPath)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val episodeNum = Regex("""(\d+)-bolum""", RegexOption.IGNORE_CASE).find(rawPath)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val label = when {
-                    seasonNum != null && episodeNum != null -> "$seasonNum. Sezon $episodeNum. Bölüm"
-                    episodeNum != null -> "$episodeNum. Bölüm"
-                    else -> rawPath.trim('/').replace('-', ' ')
-                }
-                newEpisode(epUrl) {
-                    name = label
-                    season = seasonNum
-                    episode = episodeNum
-                }
-            }
-            .toList()
-    }
-
-    override suspend fun load(url: String): LoadResponse? {
-        val fixedUrl = fixRelativeUrl(url)
-        val doc = app.get(fixedUrl, headers = defaultHeaders, referer = "$mainUrl/").document
-
-        val title = doc.selectFirst("h1, .episode-title, .series-title, meta[property='og:title']")
-            ?.let { el ->
-                if (el.tagName() == "meta") el.attr("content") else el.text()
-            }
-            ?.trim()
-            ?.replace(Regex("""\s*\|\s*CizgiMax.*$""", RegexOption.IGNORE_CASE), "")
-            ?.ifBlank { "İçerik" } ?: "İçerik"
-
-        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")?.takeIf { it.isNotBlank() }
-            ?.let { fixRelativeUrl(it) }
-            ?: doc.selectFirst(".poster img, .cover img, .player-wrap img, img")?.attr("src")?.takeIf { it.isNotBlank() }
-                ?.let { fixRelativeUrl(it) }
-
-        val plot = doc.selectFirst("meta[property='og:description']")?.attr("content")?.trim()
-            ?: doc.selectFirst(".description, .synopsis, .plot, p")?.text()?.trim()
-
-        val episodeLinks = extractEpisodeList(doc, fixedUrl)
-
-        return if (episodeLinks.isNotEmpty() || fixedUrl.contains("/diziler/")) {
-            newTvSeriesLoadResponse(title, fixedUrl, TvType.TvSeries, episodeLinks) {
-                this.posterUrl = poster
-                this.plot = plot
-            }
-        } else {
-            newMovieLoadResponse(title, fixedUrl, TvType.Movie, fixedUrl) {
-                this.posterUrl = poster
-                this.plot = plot
-            }
-        }
+        )
     }
 
     override suspend fun loadLinks(
@@ -300,175 +360,88 @@ class CizgiMax : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d("Kekik_$name", "loadLinks START data=$data")
+        val pageUrl = fixRelativeUrl(data)
+        val pageRes = app.get(pageUrl, headers = defaultHeaders, referer = "$mainUrl/")
+        val html = pageRes.text
+        val doc = pageRes.document
 
-        var targetPage = fixRelativeUrl(data)
-        var doc = app.get(targetPage, headers = defaultHeaders, referer = "$mainUrl/").document
-        var html = doc.html()
+        var foundAny = false
 
-        if (targetPage.contains("/diziler/")) {
-            val firstEpUrl = extractEpisodeList(doc, targetPage).firstOrNull()?.data
-            if (!firstEpUrl.isNullOrBlank()) {
-                targetPage = firstEpUrl
-                doc = app.get(targetPage, headers = defaultHeaders, referer = data).document
-                html = doc.html()
-            }
-        }
+        val embedsB64 = doc.selectFirst("[data-embeds]")?.attr("data-embeds")?.trim().orEmpty()
+        if (embedsB64.isNotBlank()) {
+            val decoded = runCatching {
+                String(Base64.decode(embedsB64, Base64.DEFAULT), Charsets.UTF_8)
+            }.getOrNull()
 
-        val b64Match = Regex("""(?:var|let|const)\s+servers\s*=\s*JSON\.parse\(atob\(["']([^"']+)["']\)\)""")
-            .find(html)
-        if (b64Match == null) {
-            Log.d("Kekik_$name", "b64Match NULL — servers regex tutmadı. HTML len=${html.length}")
-            return false
-        }
-        Log.d("Kekik_$name", "b64Match FOUND. b64 len=${b64Match.groupValues[1].length}")
+            if (!decoded.isNullOrBlank()) {
+                val arr = runCatching { JSONArray(decoded) }.getOrNull()
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val rawEmbed = arr.optString(i).trim()
+                        if (rawEmbed.isBlank()) continue
+                        val embedUrl = fixRelativeUrl(rawEmbed)
+                        val label = if (arr.length() > 1) "$name (Kaynak ${i + 1})" else name
 
-        val decodedJson = String(
-            Base64.decode(b64Match.groupValues[1], Base64.DEFAULT),
-            Charsets.UTF_8
-        )
-        Log.d("Kekik_$name", "decoded preview=${decodedJson.take(300)}")
-
-        val servers = try {
-            AppUtils.parseJson<List<CZServer>>(decodedJson)
-        } catch (e: Exception) {
-            Log.d("Kekik_$name", "JSON parse HATASI: ${e.message}")
-            emptyList()
-        }
-        Log.d("Kekik_$name", "servers count=${servers.size}")
-
-        if (servers.isEmpty()) return false
-
-        var foundLink = false
-        val ua = defaultHeaders["User-Agent"]!!
-        val playerHeaders = mapOf(
-            "User-Agent" to ua,
-            "Referer" to "$mainUrl/"
-        )
-        val iframeHeaders = defaultHeaders + mapOf(
-            "Referer" to targetPage,
-            "Origin" to mainUrl,
-            "X-Requested-With" to "XMLHttpRequest",
-            "Sec-Fetch-Dest" to "iframe",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Site" to "same-origin"
-        )
-
-        suspend fun dispatchResolvedUrl(resolvedTarget: String, displayName: String, refUrl: String) {
-            if (resolvedTarget.isBlank()) return
-            Log.d("Kekik_$name", ">>> DISPATCH: $displayName -> $resolvedTarget")
-            if (resolvedTarget.contains(".m3u8", ignoreCase = true)) {
-                foundLink = true
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = displayName,
-                        url = resolvedTarget,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = playerHeaders
+                        if (embedUrl.contains("/diziyeni/player.php")) {
+                            resolveCenterPlayer(embedUrl, pageUrl, label, callback)
+                            foundAny = true
+                        } else {
+                            if (loadExtractor(embedUrl, pageUrl, subtitleCallback, callback)) {
+                                foundAny = true
+                            }
+                        }
                     }
-                )
-            } else {
-                foundLink = true
-                loadExtractor(resolvedTarget, refUrl, subtitleCallback) { link ->
-                    callback(
-                        ExtractorLink(
-                            source = link.source.ifBlank { name },
-                            name = displayName,
-                            url = link.url,
-                            referer = link.referer.ifBlank { "$mainUrl/" },
-                            quality = link.quality,
-                            type = link.type,
-                            headers = link.headers.ifEmpty { playerHeaders },
-                            extractorData = link.extractorData
-                        )
-                    )
+                }
+            }
+            return foundAny
+        }
+
+        val diziId = Regex("""window\.__diziid\s*=\s*"([^"]+)"""")
+            .find(html)?.groupValues?.get(1)
+        val epKey = Regex("""window\.__cvdVideoEpisodeKey\s*=\s*"([^"]+)"""")
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("""window\.__bolum\s*=\s*"([^"]+)"""")
+                .find(html)?.groupValues?.get(1)
+
+        if (!diziId.isNullOrBlank() && !epKey.isNullOrBlank()) {
+            val vsUrl = "$mainUrl/diziyeni/video_sources.php?s=$diziId&b=$epKey"
+            val vsText = app.get(
+                vsUrl,
+                headers = defaultHeaders,
+                referer = pageUrl
+            ).text
+
+            val vsJson = runCatching { JSONObject(vsText) }.getOrNull()
+            val sources = vsJson?.optJSONArray("sources")
+            if (sources != null) {
+                for (i in 0 until sources.length()) {
+                    val srcObj = sources.optJSONObject(i) ?: continue
+                    val rawEmbed = srcObj.optString("embed").trim()
+                    if (rawEmbed.isBlank()) continue
+
+                    val embedUrl = fixRelativeUrl(rawEmbed)
+                    val ad = srcObj.optString("ad").trim()
+                    val kanal = srcObj.optString("kanal").trim()
+                    val take = srcObj.optInt("take", 1)
+
+                    val label = buildString {
+                        append(ad.ifBlank { kanal.ifBlank { name } })
+                        if (take > 1) append(" (Çekim $take)")
+                    }
+
+                    if (embedUrl.contains("/diziyeni/player.php")) {
+                        resolveCenterPlayer(embedUrl, pageUrl, label, callback)
+                        foundAny = true
+                    } else {
+                        if (loadExtractor(embedUrl, pageUrl, subtitleCallback, callback)) {
+                            foundAny = true
+                        }
+                    }
                 }
             }
         }
 
-        for (srv in servers) {
-            Log.d("Kekik_$name", ">>> SRV type=${srv.type} label=${srv.label}")
-            runCatching {
-                val candidates = listOfNotNull(
-                    srv.src?.takeIf { it.isNotBlank() },
-                    srv.resolveUrl?.takeIf { it.isNotBlank() },
-                    srv.streamUrl?.takeIf { it.isNotBlank() },
-                    srv.metaUrl?.takeIf { it.isNotBlank() },
-                    srv.qualitiesUrl?.takeIf { it.isNotBlank() }
-                ).distinct()
-
-                Log.d("Kekik_$name", "    candidates=${candidates.size}")
-                if (candidates.isEmpty()) return@runCatching
-
-                val label = listOfNotNull(
-                    srv.label?.takeIf { it.isNotBlank() },
-                    srv.lang?.takeIf { it.isNotBlank() }?.let { "($it)" }
-                ).joinToString(" ").ifBlank { srv.type ?: name }
-                val displayName = "$name - $label"
-
-                for (rawTarget in candidates) {
-                    val fullUrl = fixRelativeUrl(rawTarget)
-                    Log.d("Kekik_$name", "    GET $fullUrl")
-                    val response = app.get(
-                        fullUrl,
-                        headers = iframeHeaders,
-                        referer = targetPage,
-                        timeout = 25
-                    )
-                    val body = response.text.trim()
-                    Log.d("Kekik_$name", "    body len=${body.length} head=${body.take(120)}")
-                    if (body.isBlank()) continue
-
-                    if (body.startsWith("{")) {
-                        val jsonObj = JSONObject(body)
-                        val directUrl = jsonObj.optString("url").takeIf { it.isNotBlank() }
-                            ?: jsonObj.optString("src").takeIf { it.isNotBlank() }
-                            ?: jsonObj.optString("streamUrl").takeIf { it.isNotBlank() }
-                            ?: jsonObj.optString("file").takeIf { it.isNotBlank() }
-
-                        val resolvedTarget = when {
-                            directUrl != null -> fixRelativeUrl(directUrl)
-                            jsonObj.optString("id").isNotBlank() && srv.type.equals("dzen", true) ->
-                                "https://dzen.ru/embed/${jsonObj.getString("id")}"
-                            else -> null
-                        }
-
-                        if (!resolvedTarget.isNullOrBlank()) {
-                            dispatchResolvedUrl(resolvedTarget, displayName, targetPage)
-                            return@runCatching
-                        }
-                        continue
-                    }
-
-                    val m3u8Url = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(body)?.value
-                    if (!m3u8Url.isNullOrBlank()) {
-                        dispatchResolvedUrl(m3u8Url, displayName, targetPage)
-                        return@runCatching
-                    }
-
-                    val driveUrl = Regex("""https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+/preview""").find(body)?.value
-                    if (!driveUrl.isNullOrBlank()) {
-                        dispatchResolvedUrl(driveUrl, displayName, fullUrl)
-                        return@runCatching
-                    }
-
-                    val iframeSrc = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                        .find(body)?.groupValues?.getOrNull(1)
-                    if (!iframeSrc.isNullOrBlank()) {
-                        dispatchResolvedUrl(fixRelativeUrl(iframeSrc), displayName, fullUrl)
-                        return@runCatching
-                    }
-                }
-            }.onFailure { e ->
-                Log.d("Kekik_$name", "    srv ${srv.type} HATA: ${e.message}")
-            }
-        }
-
-        Log.d("Kekik_$name", "loadLinks END foundLink=$foundLink")
-        return foundLink
+        return foundAny
     }
-}
+                     }
+                     
