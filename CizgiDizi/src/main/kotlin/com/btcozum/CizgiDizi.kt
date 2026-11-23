@@ -88,7 +88,7 @@ class CizgiDizi : MainAPI() {
         val doc = app.get("$mainUrl/", headers = defaultHeaders).documentLarge
         val jsonText = doc.select("script")
             .map { it.data().trim() }
-            .firstOrNull { it.startsWith("{") || (it.contains("\"href\"") && it.contains("\"poster\"")) }
+            .firstOrNull { it.contains("\"href\"") && it.contains("\"poster\"") && it.contains("\"dataset\"") }
             ?: return cachedCatalog
 
         val arr = JSONArray(jsonText)
@@ -289,13 +289,12 @@ class CizgiDizi : MainAPI() {
             this.tags = tags
         }
     }
-
-    private suspend fun resolveCenterPlayer(
+        private suspend fun resolveCenterPlayer(
         embedUrl: String,
         pageUrl: String,
         sourceLabel: String,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): Boolean {
         val playerRes = app.get(
             embedUrl,
             headers = defaultHeaders,
@@ -304,9 +303,9 @@ class CizgiDizi : MainAPI() {
         val playerHtml = playerRes.text
         val bridgeKey = Regex("""cvdBridgeKey\s*=\s*['"](.*?)['"]""")
             .find(playerHtml)?.groupValues?.getOrNull(1)?.trim()
-            ?: return
+            ?: embedUrl.substringAfter("k=", "").substringBefore("&").trim()
 
-        if (bridgeKey.isBlank()) return
+        if (bridgeKey.isBlank()) return false
 
         val authHeaders = mapOf(
             "User-Agent" to defaultHeaders["User-Agent"]!!,
@@ -325,11 +324,17 @@ class CizgiDizi : MainAPI() {
         )
 
         val videoPath = authRes.headers["X-CVD-Video-URL"]?.trim().orEmpty()
-        if (videoPath.isBlank()) return
+        if (videoPath.isBlank()) return false
 
-        val cookieHeader = authRes.cookies
-            .map { (k, v) -> "$k=$v" }
-            .joinToString("; ")
+        val rawSetCookies = authRes.okhttpResponse.headers("Set-Cookie")
+        val cookieHeader = if (rawSetCookies.isNotEmpty()) {
+            rawSetCookies.mapNotNull { sc ->
+                val pair = sc.substringBefore(";").trim()
+                if (pair.contains("=")) pair else null
+            }.joinToString("; ")
+        } else {
+            authRes.cookies.map { (k, v) -> "$k=$v" }.joinToString("; ")
+        }
 
         val streamUrl = if (videoPath.startsWith("http")) videoPath else "$videoOrigin$videoPath"
 
@@ -356,6 +361,7 @@ class CizgiDizi : MainAPI() {
                 this.headers = streamHeaders
             }
         )
+        return true
     }
 
     override suspend fun loadLinks(
@@ -392,8 +398,9 @@ class CizgiDizi : MainAPI() {
                         val label = if (arr.length() > 1) "$name (Kaynak ${i + 1})" else name
 
                         if (embedUrl.contains("/diziyeni/player.php")) {
-                            resolveCenterPlayer(embedUrl, pageUrl, label, callback)
-                            foundAny = true
+                            if (resolveCenterPlayer(embedUrl, pageUrl, label, callback)) {
+                                foundAny = true
+                            }
                         } else {
                             if (loadExtractor(embedUrl, pageUrl, subtitleCallback, callback)) {
                                 foundAny = true
@@ -439,8 +446,9 @@ class CizgiDizi : MainAPI() {
                     }
 
                     if (embedUrl.contains("/diziyeni/player.php")) {
-                        resolveCenterPlayer(embedUrl, pageUrl, label, callback)
-                        foundAny = true
+                        if (resolveCenterPlayer(embedUrl, pageUrl, label, callback)) {
+                            foundAny = true
+                        }
                     } else {
                         if (loadExtractor(embedUrl, pageUrl, subtitleCallback, callback)) {
                             foundAny = true
