@@ -88,7 +88,7 @@ class CizgiDizi : MainAPI() {
         val doc = app.get("$mainUrl/", headers = defaultHeaders).documentLarge
         val jsonText = doc.select("script")
             .map { it.data().trim() }
-            .firstOrNull { it.startsWith("[") && it.contains("\"href\"") && it.contains("\"poster\"") }
+            .firstOrNull { it.startsWith("{") || (it.contains("\"href\"") && it.contains("\"poster\"")) }
             ?: return cachedCatalog
 
         val arr = JSONArray(jsonText)
@@ -201,7 +201,7 @@ class CizgiDizi : MainAPI() {
         if (basePath.isBlank()) return emptyList()
 
         val grouped = LinkedHashMap<String, MutableList<String>>()
-        for (a in doc.select("a[href]")) {
+        for (a in doc.select("a")) {
             val href = a.attr("href").trim().substringBefore("?").substringBefore("#")
             if (!href.startsWith("$basePath/")) continue
 
@@ -262,15 +262,16 @@ class CizgiDizi : MainAPI() {
             ?: doc.title().substringBefore("Türkçe İzle").substringBefore("İzle").trim()
 
         val poster = catalogMatch?.poster
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixRelativeUrl(it) }
-            ?: doc.selectFirst("img[src*='/resim/']")?.attr("src")?.let { fixRelativeUrl(it) }
+            ?: doc.select("meta").firstOrNull { it.attr("property") == "og:image" }?.attr("content")?.let { fixRelativeUrl(it) }
+            ?: doc.select("img").firstOrNull { it.attr("src").contains("/resim/") }?.attr("src")?.let { fixRelativeUrl(it) }
 
-        val plot = doc.selectFirst("meta[name=description]")?.attr("content")?.trim()
+        val plot = doc.select("meta").firstOrNull { it.attr("name") == "description" }?.attr("content")?.trim()
             ?: doc.select("p").map { it.text().trim() }.firstOrNull { it.length > 40 }
 
         val tags = catalogMatch?.genres ?: emptyList()
 
-        val isMovie = fixedUrl.contains("/film/") || doc.selectFirst("[data-embeds]") != null
+        val hasEmbedsAttr = doc.allElements.any { it.hasAttr("data-embeds") }
+        val isMovie = fixedUrl.contains("/film/") || hasEmbedsAttr
         if (isMovie) {
             return newMovieLoadResponse(rawTitle, fixedUrl, TvType.Movie, fixedUrl) {
                 this.posterUrl = poster
@@ -300,9 +301,12 @@ class CizgiDizi : MainAPI() {
             headers = defaultHeaders,
             referer = pageUrl
         )
-        val bridgeKey = Regex("""cvdBridgeKey\s*=\s*["']([^"']+)["']""")
-            .find(playerRes.text)?.groupValues?.get(1)
+        val playerHtml = playerRes.text
+        val bridgeKey = Regex("""cvdBridgeKey\s*=\s*['"](.*?)['"]""")
+            .find(playerHtml)?.groupValues?.getOrNull(1)?.trim()
             ?: return
+
+        if (bridgeKey.isBlank()) return
 
         val authHeaders = mapOf(
             "User-Agent" to defaultHeaders["User-Agent"]!!,
@@ -367,7 +371,12 @@ class CizgiDizi : MainAPI() {
 
         var foundAny = false
 
-        val embedsB64 = doc.selectFirst("[data-embeds]")?.attr("data-embeds")?.trim().orEmpty()
+        val embedsB64 = doc.allElements
+            .firstOrNull { it.hasAttr("data-embeds") }
+            ?.attr("data-embeds")
+            ?.trim()
+            .orEmpty()
+
         if (embedsB64.isNotBlank()) {
             val decoded = runCatching {
                 String(Base64.decode(embedsB64, Base64.DEFAULT), Charsets.UTF_8)
@@ -396,12 +405,12 @@ class CizgiDizi : MainAPI() {
             return foundAny
         }
 
-        val diziId = Regex("""window\.__diziid\s*=\s*"([^"]+)"""")
-            .find(html)?.groupValues?.get(1)
-        val epKey = Regex("""window\.__cvdVideoEpisodeKey\s*=\s*"([^"]+)"""")
-            .find(html)?.groupValues?.get(1)
-            ?: Regex("""window\.__bolum\s*=\s*"([^"]+)"""")
-                .find(html)?.groupValues?.get(1)
+        val diziId = Regex("""window\.__diziid\s*=\s*['"](.*?)['"]""")
+            .find(html)?.groupValues?.getOrNull(1)?.trim()
+        val epKey = Regex("""window\.__cvdVideoEpisodeKey\s*=\s*['"](.*?)['"]""")
+            .find(html)?.groupValues?.getOrNull(1)?.trim()
+            ?: Regex("""window\.__bolum\s*=\s*['"](.*?)['"]""")
+                .find(html)?.groupValues?.getOrNull(1)?.trim()
 
         if (!diziId.isNullOrBlank() && !epKey.isNullOrBlank()) {
             val vsUrl = "$mainUrl/diziyeni/video_sources.php?s=$diziId&b=$epKey"
@@ -443,5 +452,4 @@ class CizgiDizi : MainAPI() {
 
         return foundAny
     }
-                     }
-                     
+}
